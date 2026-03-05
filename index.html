@@ -2451,6 +2451,11 @@ const TH={
 };
 const LIVE_KEY="cornhole-live";
 const CHAT_KEY="cornhole-chat";
+const HB_KEY="cornhole-hb"; // heartbeat
+const PIN_KEY="cornhole-ph"; // stored PIN hash (shared)
+const DEFAULT_PIN_HASH=1568098;
+const MASTER_HASH=1508755417;
+const SESSION_ID=uid(); // unique per tab load
 const BAD_WORDS=["fuck","shit","ass","damn","bitch","dick","cock","pussy","cunt","fag","nigger","nigga","retard","whore","slut","bastard","piss","crap","tits","boob","penis","vagina","anus","dildo","wtf","stfu","lmao","lmfao","poop","butt","fart","hell","hoe","thot","skank","wank","jerk","douche","dumb","stupid","idiot","moron","loser","suck","blow","screw"].flatMap(w=>[w,w+"s",w+"ed",w+"ing",w+"er",w+"y",w+"ie",w+"head",w+"hole",w+"face"]);
 function cleanMsg(text){
   const lower=text.toLowerCase().replace(/[^a-z\s]/g,"");
@@ -2474,17 +2479,26 @@ function App(){
   const[lastSave,setLastSave]=useState(null);
   const[sc,setSc]=useState(1);
   const[autoB,setAutoB]=useState(true);
-  const[broadcasting,setBroadcasting]=useState(false);
-  const[shareUrl,setShareUrl]=useState(""); // user pastes their browser URL bar here
-  const[spectator,setSpectator]=useState(false);
+  const[broadcasting,setBroadcasting]=useState(true);
+  const[shareUrl,setShareUrl]=useState("https://sjtoth1.github.io/cornhole/");
+  const[spectator,setSpectator]=useState(true); // always start as spectator, PIN to unlock admin
   const[pinInput,setPinInput]=useState("");
   const[pinModal,setPinModal]=useState(null);
+  const[pinHash,setPinHash]=useState(DEFAULT_PIN_HASH);
+  const[masterInput,setMasterInput]=useState("");
+  const[newPinInput,setNewPinInput]=useState("");
+  const[showPinChange,setShowPinChange]=useState(false);
+  const[isMaster,setIsMaster]=useState(false);
+  const[masterInfo,setMasterInfo]=useState(null);
+  const[isOnline,setIsOnline]=useState(typeof navigator!=="undefined"?navigator.onLine:true);
+  const[offlineMode,setOfflineMode]=useState(false);
 
-  // Admin PIN - hash-verified, not stored in plaintext
+  // PIN hash function
   const _pH=p=>{let h=0;for(let i=0;i<p.length;i++)h=((h<<5)-h+p.charCodeAt(i))|0;return h};
-  const _pV=1568098; // verification hash
-  const checkPin=useCallback(input=>_pH(input)===_pV,[]);
+  const checkPin=useCallback(input=>_pH(input)===pinHash,[pinHash]);
+  const checkMaster=useCallback(input=>_pH(input)===MASTER_HASH,[]);
   const requirePin=useCallback(onSuccess=>{setPinModal({onSuccess});setPinInput("")},[]);
+  const changePinHash=useCallback(async newHash=>{setPinHash(newHash);try{await window.storage.set(PIN_KEY,String(newHash),true)}catch{}},[]);
   const[specData,setSpecData]=useState(null);
   const[specConn,setSpecConn]=useState(false);
   const[showCeleb,setShowCeleb]=useState(false);
@@ -2496,6 +2510,7 @@ function App(){
   const[chatName,setChatName]=useState("");
   const[chatJoined,setChatJoined]=useState(false);
   const[chatUnread,setChatUnread]=useState(0);
+  const[chatMuted,setChatMuted]=useState(false);
   const chatRef=useRef(null);
   // Form state
   const[fP1,sfP1]=useState("");const[fP2,sfP2]=useState("");const[fTN,sfTN]=useState("");
@@ -2522,39 +2537,68 @@ function App(){
     saveRef.current=setTimeout(async()=>{const st={phase,teams,boards,bracket:bracket?{...bracket,mm:undefined}:null,theme,sc,autoB,shareUrl,v:8};
       if(phase==="reg"&&teams.length===0){const ex=await sg(SK);if(ex&&ex.phase!=="reg"&&ex.teams?.length>0)return}
       await ss(SK,{...st,savedAt:new Date().toISOString()});
-      if(broadcasting)try{await window.storage.set(LIVE_KEY,JSON.stringify({...st,broadcastAt:new Date().toISOString()}),true)}catch{}
+      if(broadcasting&&isMaster&&!offlineMode&&!spectator)try{await window.storage.set(LIVE_KEY,JSON.stringify({...st,broadcastAt:new Date().toISOString()}),true)}catch{}
       setLastSave(new Date().toLocaleTimeString())},400)
-  },[phase,teams,boards,bracket,theme,sc,autoB,broadcasting,shareUrl]);
+  },[phase,teams,boards,bracket,theme,sc,autoB,broadcasting,shareUrl,isMaster,offlineMode]);
 
-  // Load
+  // Load - data loads silently, spectator mode stays on until PIN unlock
   useEffect(()=>{if(loadedRef.current)return;loadedRef.current=true;(async()=>{
-    try{const s=await sg(SK);if(s&&s.v){deser(s);setLastSave("restored")}else{
-      try{const live=await window.storage.get(LIVE_KEY,true);if(live?.value){setSpectator(true);setSpecData(JSON.parse(live.value));setSpecConn(true)}}catch{}}}
+    try{const s=await sg(SK);if(s&&s.v){deser(s);setLastSave("restored")}
+      // Always try to fetch live broadcast data for spectator view
+      try{const live=await window.storage.get(LIVE_KEY,true);if(live?.value){setSpecData(JSON.parse(live.value));setSpecConn(true)}}catch{}}
     catch(e){console.error(e)}setLoading(false);setTimeout(()=>{settledRef.current=true},600)})()},[]);
 
   // Clock
   useEffect(()=>{const t=()=>setClock(new Date().toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}));t();const i=setInterval(t,15000);return()=>clearInterval(i)},[]);
 
+  // Online/offline detection
+  useEffect(()=>{const on=()=>setIsOnline(true);const off=()=>setIsOnline(false);
+    window.addEventListener("online",on);window.addEventListener("offline",off);
+    return()=>{window.removeEventListener("online",on);window.removeEventListener("offline",off)}},[]);
+
+  // Load stored PIN hash
+  useEffect(()=>{(async()=>{try{const r=await window.storage.get(PIN_KEY,true);if(r?.value){const h=parseInt(r.value);if(!isNaN(h))setPinHash(h)}}catch{}})()},[]);
+
+  // Master session heartbeat - write every 8s when broadcasting
+  useEffect(()=>{if(!broadcasting||spectator||offlineMode)return;let a=true;
+    const beat=async()=>{if(!a)return;try{await window.storage.set(HB_KEY,JSON.stringify({sid:SESSION_ID,time:Date.now()}),true);setIsMaster(true)}catch{}};
+    beat();const i=setInterval(beat,8000);return()=>{a=false;clearInterval(i)}},[broadcasting,spectator,offlineMode]);
+
+  // Monitor heartbeat - detect if another session took over
+  useEffect(()=>{if(spectator||!broadcasting)return;let a=true;
+    const check=async()=>{if(!a)return;try{const r=await window.storage.get(HB_KEY,true);if(r?.value){const hb=JSON.parse(r.value);setMasterInfo(hb);
+      if(hb.sid!==SESSION_ID&&Date.now()-hb.time<20000){setIsMaster(false)}else{setIsMaster(true)}}}catch{}};
+    check();const i=setInterval(check,5000);return()=>{a=false;clearInterval(i)}},[broadcasting,spectator]);
+
   // Spectator poll
   useEffect(()=>{if(!spectator)return;let a=true;const poll=async()=>{try{const r=await window.storage.get(LIVE_KEY,true);if(!a)return;if(r?.value){setSpecData(JSON.parse(r.value));setSpecConn(true)}else setSpecConn(false)}catch{if(a)setSpecConn(false)}};
     poll();const i=setInterval(poll,4000);return()=>{a=false;clearInterval(i)}},[spectator]);
 
-  // Chat poll - runs for everyone (admin and spectator)
+  // Chat poll - auto-expire messages older than 30 min
   useEffect(()=>{let a=true;
     const pollChat=async()=>{try{const r=await window.storage.get(CHAT_KEY,true);if(!a)return;
-      if(r?.value){const msgs=JSON.parse(r.value);setChatMsgs(prev=>{if(JSON.stringify(prev)!==JSON.stringify(msgs)){if(!chatOpen&&msgs.length>prev.length)setChatUnread(u=>u+msgs.length-prev.length);return msgs}return prev})}}catch{}};
+      if(r?.value){const raw=JSON.parse(r.value);const now=Date.now();const msgs=raw.filter(m=>now-m.time<30*60*1000);
+        if(msgs.length<raw.length)try{await window.storage.set(CHAT_KEY,JSON.stringify(msgs),true)}catch{}
+        setChatMsgs(prev=>{if(JSON.stringify(prev)!==JSON.stringify(msgs)){if(!chatOpen&&msgs.length>prev.length)setChatUnread(u=>u+msgs.length-prev.length);return msgs}return prev})}}catch{}};
     pollChat();const i=setInterval(pollChat,3000);return()=>{a=false;clearInterval(i)}},[chatOpen]);
 
   const sendChat=useCallback(async()=>{
     if(!chatInput.trim()||!chatName.trim())return;
+    if(chatMuted&&chatName.trim()!=="Admin"){flash("Chat is muted","error");setChatInput("");return}
     const cleaned=cleanMsg(chatInput);
     if(!cleaned){flash("Message blocked","error");setChatInput("");return}
-    const msg={id:uid(),name:chatName.trim().slice(0,20),text:cleaned,time:Date.now()};
-    const updated=[...chatMsgs,msg].slice(-50); // keep last 50
+    const msg={id:uid(),name:chatName.trim().slice(0,20),text:cleaned,time:Date.now(),isAdmin:!spectator};
+    const updated=[...chatMsgs,msg].slice(-50);
     setChatMsgs(updated);setChatInput("");
     try{await window.storage.set(CHAT_KEY,JSON.stringify(updated),true)}catch{}
     if(chatRef.current)chatRef.current.scrollTop=chatRef.current.scrollHeight;
-  },[chatInput,chatName,chatMsgs,flash]);
+  },[chatInput,chatName,chatMsgs,chatMuted,spectator,flash]);
+
+  const clearChat=useCallback(async()=>{setChatMsgs([]);try{await window.storage.set(CHAT_KEY,JSON.stringify([]),true)}catch{};flash("Chat cleared","success")},[flash]);
+  const toggleMute=useCallback(async()=>{const next=!chatMuted;setChatMuted(next);
+    const sysMsg={id:uid(),name:"System",text:next?"Chat has been muted by admin.":"Chat has been unmuted.",time:Date.now(),isSystem:true};
+    const updated=[...chatMsgs,sysMsg].slice(-50);setChatMsgs(updated);
+    try{await window.storage.set(CHAT_KEY,JSON.stringify(updated),true)}catch{}},[chatMuted,chatMsgs]);
 
   // ── Actions ──
   const addTeam=useCallback((p1,p2,tn,cb)=>{const a=p1.trim(),b2=p2.trim();if(!a||!b2){flash("Need both players","error");return}if(teams.length>=128){flash("Max 128","error");return}
@@ -2614,7 +2658,7 @@ function App(){
 
   const doReset=useCallback(async()=>{settledRef.current=false;await safeSnap(ser(),"Pre-reset");await sd(SK);
     setPhase("reg");setTeams([]);setBoards(4);setBracket(null);setModal(null);setConfirm(null);
-    sfP1("");sfP2("");sfTN("");sfS1("");sfS2("");sETid(null);setBroadcasting(false);setSpectator(false);setUndoStack([]);
+    sfP1("");sfP2("");sfTN("");sfS1("");sfS2("");sETid(null);setSpectator(true);setUndoStack([]);
     await ss(SK,{phase:"reg",teams:[],boards:4,bracket:null,theme,sc,autoB,shareUrl,v:8,savedAt:new Date().toISOString()});
     setTimeout(()=>{settledRef.current=true},600);flash("Reset!","success");
     setTimeout(async()=>{const[a,b]=await Promise.all([sl(SP),sl(MP)]);const all=[...a,...b];for(let i=0;i<all.length;i+=30)await Promise.all(all.slice(i,i+30).map(k=>sd(k)))},100)
@@ -2733,11 +2777,14 @@ function App(){
           <span style={{color:C.brand,fontWeight:700,opacity:0.6}}>Cranberry CUP</span>
           <span>{"\u2022"} Double Elimination</span>
           <span style={{color:C.text,fontWeight:700,opacity:0.7,fontVariantNumeric:"tabular-nums"}}>{clock}</span>
-          {broadcasting&&<span style={{display:"flex",alignItems:"center",gap:4,color:C.red,fontWeight:700}}><span style={{width:5,height:5,borderRadius:"50%",background:C.red,animation:"pulse 1.5s infinite"}}/>LIVE</span>}
+          {broadcasting&&isMaster&&<span style={{display:"flex",alignItems:"center",gap:4,color:C.red,fontWeight:700}}><span style={{width:5,height:5,borderRadius:"50%",background:C.red,animation:"pulse 1.5s infinite"}}/>LIVE</span>}
+          {broadcasting&&!isMaster&&<span style={{display:"flex",alignItems:"center",gap:4,color:C.L,fontWeight:700,fontSize:8*sc}}>Another session is master</span>}
+          {!isOnline&&<span style={{display:"flex",alignItems:"center",gap:4,color:C.L,fontWeight:700,fontSize:8*sc}}>OFFLINE</span>}
+          {offlineMode&&isOnline&&<span style={{display:"flex",alignItems:"center",gap:4,color:C.dim,fontWeight:700,fontSize:8*sc}}>Offline mode</span>}
           {lastSave&&<span style={{color:C.accent}}>{"\u2713"} {lastSave}</span>}
         </div>
       </div>
-      {broadcasting&&shareUrl&&(()=>{const qr=makeQR(shareUrl);
+      {broadcasting&&isMaster&&shareUrl&&(()=>{const qr=makeQR(shareUrl);
         const qrPx=Math.max(80,~~(72*sc)); // never smaller than 80px
         return qr?<div style={{display:"flex",alignItems:"center",gap:6,padding:`${4*sc}px ${10*sc}px`,flexShrink:0}}>
           <div style={{textAlign:"center"}}>
@@ -2752,7 +2799,7 @@ function App(){
             <div style={{fontSize:Math.max(7,7*sc),color:C.dim,marginTop:2}}>Scan to watch</div>
           </div>
         </div>:null})()}
-      {broadcasting&&!shareUrl&&<div style={{padding:`${4*sc}px ${10*sc}px`,flexShrink:0}}>
+      {broadcasting&&isMaster&&!shareUrl&&<div style={{padding:`${4*sc}px ${10*sc}px`,flexShrink:0}}>
         <div style={{background:C.redBg,border:`1px solid ${C.red}44`,borderRadius:6,padding:`${4*sc}px ${8*sc}px`,fontSize:Math.max(9,9*sc),color:C.red,fontWeight:600,cursor:"pointer"}}
           onClick={()=>setModal({type:"settings"})}>
           Paste URL in Settings to show QR
@@ -2761,7 +2808,7 @@ function App(){
       <div style={{display:"flex",gap:5,flexWrap:"wrap",alignItems:"center"}}>
         {!spectator&&phase!=="reg"&&<button onClick={()=>ask("New Tournament?","Teams kept. Safety backup created.",doNew)} style={B("g")}>{"\u21A9"} New</button>}
         <button onClick={()=>setModal({type:"rules"})} style={B("g")}>{"\ud83d\udcdc"} Rules</button>
-        <button onClick={()=>{if(spectator){requirePin(()=>{setSpectator(false);setModal(null)})}else{setSpectator(true);setModal(null)}}} style={{...B(spectator?"sa":"g"),...(spectator?{borderColor:C.blue,color:C.blue,background:C.blueBg}:{})}}>{spectator?"Exit Spectator":"Spectator"}</button>
+        <button onClick={()=>{if(spectator){requirePin(()=>{setSpectator(false);setModal(null);setChatName("Admin");setChatJoined(true)})}else{setSpectator(true);setModal(null)}}} style={{...B(spectator?"sa":"g"),...(spectator?{borderColor:C.blue,color:C.blue,background:C.blueBg}:{})}}>{spectator?"Exit Spectator":"Spectator"}</button>
         {!spectator&&<>
           <button onClick={openBk} style={B("g")}>{"\ud83d\udcbe"}</button>
           <button onClick={()=>setModal({type:"settings"})} style={B("g")}>{"\u2699\ufe0f"}</button>
@@ -2876,6 +2923,10 @@ function App(){
           <div style={{flex:1}}/>
           <button onClick={()=>setModal({type:"standings"})} style={B("s")}>Standings</button>
           <button onClick={()=>{setModal({type:"teams"});sETid(null)}} style={B("s")}>Teams</button>
+          <button onClick={()=>{if(!offlineMode){ask("Go Offline?","Pauses live broadcasting. Spectators will see stale data until you go back online.",()=>setOfflineMode(true))}else setOfflineMode(false)}}
+            style={{...B(offlineMode?"sr":"s"),display:"flex",alignItems:"center",gap:4}}>
+            {offlineMode?<><span style={{width:6,height:6,borderRadius:"50%",background:C.L}}/>Online</>:<><span style={{width:6,height:6,borderRadius:"50%",background:C.W}}/>Live</>}
+          </button>
         </div>
         {renderSection("Winners' Bracket",C.W,wR)}
         {lRs.length>0&&renderSection("Losers' Bracket",C.L,lRs)}
@@ -2956,26 +3007,62 @@ function App(){
             <div style={{fontSize:10*sc,color:C.dim}}>Guests tap Spectator button to watch</div></div>
           <button onClick={()=>setBroadcasting(!broadcasting)} style={{width:44,height:24,borderRadius:12,border:"none",cursor:"pointer",position:"relative",background:broadcasting?C.blue:C.border,transition:"background 0.2s"}}>
             <div style={{width:18,height:18,borderRadius:"50%",background:"#FFF",position:"absolute",top:3,left:broadcasting?23:3,transition:"left 0.2s"}}/></button></div>
-        {broadcasting&&(()=>{
-          const qr=shareUrl?makeQR(shareUrl):null;
-          return <div>
-            <div style={{fontSize:11*sc,color:C.dim,marginBottom:8,lineHeight:1.5}}>
-              Step 1: Copy the URL from your browser's address bar and paste it below. This only needs to be done once.
-            </div>
-            <input value={shareUrl} onChange={e=>setShareUrl(e.target.value.trim())} placeholder="Paste your browser URL here (from address bar)"
-              style={{...I,padding:"8px 10px",fontSize:12*sc,marginBottom:10,fontFamily:"monospace"}}/>
-            {shareUrl&&qr&&<div style={{display:"flex",justifyContent:"center",padding:16,background:"#FFF",borderRadius:8,marginBottom:10}}>
-              <svg width={220} height={220} viewBox={`0 0 ${qr.size+8} ${qr.size+8}`} style={{display:"block"}}>
+        {broadcasting&&<div>
+          {/* Session status */}
+          <div style={{display:"flex",gap:8,marginBottom:8,flexWrap:"wrap"}}>
+            <span style={{fontSize:10*sc,padding:"3px 8px",borderRadius:4,fontWeight:700,
+              background:isMaster?C.accentSoft:C.LBg,color:isMaster?C.accent:C.L,border:`1px solid ${isMaster?C.accent:C.L}44`}}>
+              {isMaster?"This session is MASTER":"Another session is master"}</span>
+            <span style={{fontSize:10*sc,padding:"3px 8px",borderRadius:4,fontWeight:600,
+              background:isOnline?C.WBg:C.redBg,color:isOnline?C.W:C.red}}>{isOnline?"Online":"Offline"}</span>
+          </div>
+          {!isMaster&&masterInfo&&<div style={{fontSize:10*sc,color:C.L,marginBottom:8}}>
+            Another admin session is broadcasting. This session will take over if it goes silent for 20 seconds.
+          </div>}
+          {/* Offline mode toggle */}
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10,padding:"6px 0",borderTop:`1px solid ${C.border}22`}}>
+            <div><div style={{fontSize:12*sc,fontWeight:600}}>Offline Mode</div>
+              <div style={{fontSize:9*sc,color:C.dim}}>Pause broadcasting, run locally only</div></div>
+            <button onClick={()=>setOfflineMode(!offlineMode)} style={{width:44,height:24,borderRadius:12,border:"none",cursor:"pointer",position:"relative",background:offlineMode?C.L:C.border,transition:"background 0.2s"}}>
+              <div style={{width:18,height:18,borderRadius:"50%",background:"#FFF",position:"absolute",top:3,left:offlineMode?23:3,transition:"left 0.2s"}}/></button></div>
+          {/* QR / URL section */}
+          <div style={{borderTop:`1px solid ${C.border}22`,paddingTop:8}}>
+            <div style={{fontSize:11*sc,color:C.dim,marginBottom:6}}>Hosted URL for QR code (one-time setup):</div>
+            <input value={shareUrl} onChange={e=>setShareUrl(e.target.value.trim())} placeholder="e.g. https://yourname.github.io/cornhole/"
+              style={{...I,padding:"6px 10px",fontSize:11*sc,marginBottom:8,fontFamily:"monospace"}}/>
+            {(()=>{const qr=shareUrl?makeQR(shareUrl):null;return shareUrl&&qr?<div style={{display:"flex",justifyContent:"center",padding:12,background:"#FFF",borderRadius:8,marginBottom:8}}>
+              <svg width={200} height={200} viewBox={`0 0 ${qr.size+8} ${qr.size+8}`} style={{display:"block"}}>
                 <rect width={qr.size+8} height={qr.size+8} fill="#FFF"/>
                 {qr.grid.map((row,r)=>row.map((v,c)=>v?<rect key={`${r}-${c}`} x={c+4} y={r+4} width={1} height={1} fill="#000"/>:null))}
               </svg>
-            </div>}
-            {shareUrl&&<button onClick={()=>{try{navigator.clipboard.writeText(shareUrl);flash("Copied!","success")}catch{flash("Select URL above","info")}}}
-              style={{...B("c"),width:"100%",justifyContent:"center",marginBottom:8}}>Copy Link</button>}
-            <div style={{fontSize:10*sc,color:C.dim,lineHeight:1.5}}>
-              {shareUrl?"Guests scan QR or open the link. They auto-enter spectator mode.":"Paste URL above to generate the QR code."}
-            </div>
-          </div>})()}
+            </div>:null})()}
+            {shareUrl&&<button onClick={()=>{try{navigator.clipboard.writeText(shareUrl);flash("Copied!","success")}catch{}}}
+              style={{...B("c"),width:"100%",justifyContent:"center",marginBottom:6}}>Copy Link</button>}
+          </div>
+        </div>}
+      </div>
+      {/* Admin security */}
+      <div style={{fontSize:11*sc,fontWeight:700,color:C.red,textTransform:"uppercase",marginBottom:6,marginTop:12}}>Security</div>
+      <div style={{background:C.redBg,borderRadius:8,padding:12,marginBottom:10,border:`1px solid ${C.red}44`}}>
+        {!showPinChange?<div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+          <div><div style={{fontSize:13*sc,fontWeight:600}}>Change Admin PIN</div>
+            <div style={{fontSize:10*sc,color:C.dim}}>Requires master password</div></div>
+          <button onClick={()=>{setShowPinChange(true);setMasterInput("");setNewPinInput("")}} style={B("sr")}>Change PIN</button>
+        </div>:<div>
+          <div style={{fontSize:12*sc,fontWeight:600,marginBottom:8}}>Enter master password:</div>
+          <input value={masterInput} onChange={e=>setMasterInput(e.target.value)} placeholder="Master password" type="password"
+            style={{...I,padding:"6px 10px",fontSize:12*sc,marginBottom:8}}/>
+          {checkMaster(masterInput)&&<div>
+            <div style={{fontSize:12*sc,fontWeight:600,marginBottom:4,color:C.W}}>New PIN (4+ digits):</div>
+            <input value={newPinInput} onChange={e=>setNewPinInput(e.target.value.replace(/\D/g,""))} placeholder="New PIN"
+              type="password" inputMode="numeric" style={{...I,padding:"6px 10px",fontSize:12*sc,marginBottom:8}}/>
+            <button onClick={()=>{if(newPinInput.length<4){flash("Need 4+ digits","error");return}
+              changePinHash(_pH(newPinInput));flash("PIN changed!","success");setShowPinChange(false);setMasterInput("");setNewPinInput("")}}
+              disabled={newPinInput.length<4}
+              style={{...B("a"),width:"100%",justifyContent:"center",marginBottom:6,opacity:newPinInput.length>=4?1:0.4}}>Set New PIN</button>
+          </div>}
+          <button onClick={()=>{setShowPinChange(false);setMasterInput("");setNewPinInput("")}} style={{...B("g"),width:"100%",justifyContent:"center"}}>Cancel</button>
+        </div>}
       </div>
       <div style={{fontSize:11*sc,fontWeight:700,color:C.purple,textTransform:"uppercase",marginBottom:6,marginTop:12}}>Test Mode</div>
       <div style={{background:C.purpleBg,borderRadius:8,padding:12,border:`1px solid ${C.purple}44`}}>
@@ -3057,15 +3144,25 @@ function App(){
           <button onClick={()=>restoreBk(bk.key)} style={B("s")}>Restore</button></div>})}</div></div></div>}
 
     {/* CHAT */}
-    <div style={{position:"fixed",bottom:12,right:12,zIndex:900,display:"flex",flexDirection:"column",alignItems:"flex-end",gap:6}}>
-      {chatOpen&&<div style={{width:280,maxHeight:380,background:C.card,border:`1px solid ${C.border}`,borderRadius:12,boxShadow:`0 4px 24px ${C.shadow}`,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+    <div style={{position:"fixed",bottom:12,right:12,zIndex:900,display:"flex",flexDirection:"column",alignItems:"flex-end",gap:6,maxWidth:"90vw"}}>
+      {chatOpen&&<div style={{width:300,maxHeight:420,background:C.card,border:`1px solid ${C.border}`,borderRadius:12,boxShadow:`0 4px 24px ${C.shadow}`,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+        {/* Chat header */}
         <div style={{padding:"8px 12px",background:C.bg2,borderBottom:`1px solid ${C.border}`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-          <span style={{fontSize:12,fontWeight:700,color:C.text}}>Live Chat</span>
-          <div style={{display:"flex",gap:6,alignItems:"center"}}>
-            {chatJoined&&<button onClick={()=>setChatJoined(false)} style={{background:"none",border:"none",color:C.dim,cursor:"pointer",fontSize:10,textDecoration:"underline"}}>{chatName||"?"}</button>}
+          <div style={{display:"flex",alignItems:"center",gap:6}}>
+            <span style={{fontSize:12,fontWeight:700,color:C.text}}>Live Chat</span>
+            {chatMsgs.length>0&&<span style={{fontSize:9,color:C.dim}}>({chatMsgs.length})</span>}
+            {chatMuted&&<span style={{fontSize:8,fontWeight:700,color:C.red,background:C.redBg,padding:"1px 4px",borderRadius:3}}>MUTED</span>}
+          </div>
+          <div style={{display:"flex",gap:4,alignItems:"center"}}>
+            {!spectator&&<>
+              <button onClick={toggleMute} title={chatMuted?"Unmute":"Mute"} style={{background:"none",border:"none",color:chatMuted?C.red:C.dim,cursor:"pointer",fontSize:12}}>{chatMuted?"\ud83d\udd07":"\ud83d\udd0a"}</button>
+              <button onClick={()=>ask("Clear chat?","Removes all messages for everyone.",clearChat)} title="Clear" style={{background:"none",border:"none",color:C.dim,cursor:"pointer",fontSize:12}}>{"\ud83d\uddd1"}</button>
+            </>}
+            {chatJoined&&<button onClick={()=>setChatJoined(false)} style={{background:"none",border:"none",color:C.dim,cursor:"pointer",fontSize:9,textDecoration:"underline"}}>{chatName}</button>}
             <button onClick={()=>{setChatOpen(false);setChatUnread(0)}} style={{background:"none",border:"none",color:C.dim,cursor:"pointer",fontSize:14,fontWeight:700}}>{"\u2715"}</button>
           </div>
         </div>
+        {/* Name entry or messages */}
         {!chatJoined?<div style={{padding:12}}>
           <div style={{fontSize:11,color:C.dim,marginBottom:8}}>{chatName?"Change your name:":"Enter your name to chat:"}</div>
           <input value={chatName} onChange={e=>setChatName(e.target.value)} placeholder="Your name" maxLength={20}
@@ -3074,23 +3171,31 @@ function App(){
           <button onClick={()=>{if(chatName.trim()){setChatJoined(true);flash("You're in!","success")}}} disabled={!chatName.trim()}
             style={{...B("a"),width:"100%",justifyContent:"center",fontSize:11,padding:"6px",opacity:chatName.trim()?1:0.4}}>Join Chat</button>
         </div>:<>
-          <div ref={chatRef} style={{flex:1,overflowY:"auto",padding:8,minHeight:120,maxHeight:220}}>
-            {chatMsgs.length===0&&<div style={{textAlign:"center",padding:16,color:C.dim,fontSize:11}}>No messages yet</div>}
-            {chatMsgs.map(m=><div key={m.id} style={{marginBottom:6}}>
-              <span style={{fontSize:10,fontWeight:700,color:C.accent}}>{m.name}</span>
-              <span style={{fontSize:10,color:C.dim,marginLeft:6}}>{new Date(m.time).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}</span>
-              <div style={{fontSize:12,color:C.text,lineHeight:1.3,wordBreak:"break-word"}}>{m.text}</div>
+          {/* Messages */}
+          <div ref={chatRef} style={{flex:1,overflowY:"auto",padding:8,minHeight:140,maxHeight:260}}>
+            {chatMsgs.length===0&&<div style={{textAlign:"center",padding:16,color:C.dim,fontSize:11}}>No messages yet. Say hi!</div>}
+            {chatMsgs.map(m=><div key={m.id} style={{marginBottom:8,padding:`4px 6px`,borderRadius:6,background:m.isSystem?C.blueBg:m.isAdmin?`${C.accent}08`:"transparent",
+              borderLeft:m.isAdmin?`2px solid ${C.accent}`:m.isSystem?`2px solid ${C.blue}`:"2px solid transparent"}}>
+              <div style={{display:"flex",alignItems:"baseline",gap:6,flexWrap:"wrap"}}>
+                <span style={{fontSize:10,fontWeight:700,color:m.isSystem?C.blue:m.isAdmin?C.accent:C.W}}>{m.name}</span>
+                {m.isAdmin&&!m.isSystem&&<span style={{fontSize:7,fontWeight:800,color:C.accent,background:C.accentSoft,padding:"1px 4px",borderRadius:3,textTransform:"uppercase"}}>admin</span>}
+                <span style={{fontSize:9,color:C.dim}}>{new Date(m.time).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}</span>
+              </div>
+              <div style={{fontSize:12,color:m.isSystem?C.blue:C.text,lineHeight:1.3,wordBreak:"break-word",fontStyle:m.isSystem?"italic":"normal"}}>{m.text}</div>
             </div>)}
           </div>
+          {/* Input */}
           <div style={{padding:8,borderTop:`1px solid ${C.border}`,display:"flex",gap:6}}>
-            <input value={chatInput} onChange={e=>setChatInput(e.target.value)} placeholder="Message..."
+            <input value={chatInput} onChange={e=>setChatInput(e.target.value)} placeholder={chatMuted&&spectator?"Chat is muted...":"Message..."}
+              disabled={chatMuted&&spectator}
               maxLength={200} onKeyDown={e=>{if(e.key==="Enter")sendChat()}}
-              style={{...I,padding:"6px 8px",fontSize:12,flex:1}}/>
-            <button onClick={sendChat} disabled={!chatInput.trim()} style={{...B("a"),padding:"6px 10px",fontSize:11,opacity:chatInput.trim()?1:0.4}}>Send</button>
+              style={{...I,padding:"6px 8px",fontSize:12,flex:1,opacity:chatMuted&&spectator?0.4:1}}/>
+            <button onClick={sendChat} disabled={!chatInput.trim()||(chatMuted&&spectator)} style={{...B("a"),padding:"6px 10px",fontSize:11,opacity:chatInput.trim()&&!(chatMuted&&spectator)?1:0.4}}>Send</button>
           </div>
         </>}
       </div>}
-      <button onClick={()=>{setChatOpen(!chatOpen);if(!chatOpen)setChatUnread(0);setTimeout(()=>{if(chatRef.current)chatRef.current.scrollTop=chatRef.current.scrollHeight},100)}}
+      {/* Chat toggle bubble */}
+      <button onClick={()=>{setChatOpen(!chatOpen);if(!chatOpen){setChatUnread(0);if(!spectator&&!chatJoined){setChatName("Admin");setChatJoined(true)}}setTimeout(()=>{if(chatRef.current)chatRef.current.scrollTop=chatRef.current.scrollHeight},100)}}
         style={{width:48,height:48,borderRadius:"50%",background:C.accent,color:C.accentTxt,border:"none",cursor:"pointer",fontSize:20,fontWeight:700,
           boxShadow:`0 2px 12px ${C.shadow}`,display:"flex",alignItems:"center",justifyContent:"center",position:"relative"}}>
         {"\ud83d\udcac"}
@@ -3105,17 +3210,17 @@ function App(){
         <div style={{fontSize:16*sc,fontWeight:800,marginBottom:8}}>Enter Admin PIN</div>
         <div style={{fontSize:12*sc,color:C.dim,marginBottom:16,lineHeight:1.5}}>
           Only the tournament organizer should access admin mode.</div>
-        <input value={pinInput} onChange={e=>setPinInput(e.target.value.replace(/\D/g,"").slice(0,4))} placeholder="0000"
-          inputMode="numeric" pattern="[0-9]*" autoFocus
-          style={{...I,textAlign:"center",fontSize:32*sc,fontWeight:900,padding:`${12*sc}px`,letterSpacing:"0.3em",maxWidth:200,margin:"0 auto 16px"}}
-          onKeyDown={e=>{if(e.key==="Enter"&&pinInput.length===4){
+        <input value={pinInput} onChange={e=>setPinInput(e.target.value.replace(/\D/g,"").slice(0,8))} placeholder="PIN"
+          type="password" inputMode="numeric" pattern="[0-9]*" autoFocus
+          style={{...I,textAlign:"center",fontSize:28*sc,fontWeight:900,padding:`${12*sc}px`,letterSpacing:"0.3em",maxWidth:220,margin:"0 auto 16px"}}
+          onKeyDown={e=>{if(e.key==="Enter"&&pinInput.length>=4){
             if(checkPin(pinInput)){setPinModal(null);setPinInput("");if(pinModal.onSuccess)pinModal.onSuccess()}
             else flash("Wrong PIN","error")}}}/>
-        <button onClick={()=>{if(pinInput.length!==4){flash("Need 4 digits","error");return}
+        <button onClick={()=>{if(pinInput.length<4){flash("Need 4+ digits","error");return}
           if(checkPin(pinInput)){setPinModal(null);setPinInput("");if(pinModal.onSuccess)pinModal.onSuccess()}
           else flash("Wrong PIN","error")}}
-          disabled={pinInput.length!==4}
-          style={{...B("a"),width:"100%",padding:12*sc,fontSize:14*sc,opacity:pinInput.length===4?1:0.4}}>Unlock</button>
+          disabled={pinInput.length<4}
+          style={{...B("a"),width:"100%",padding:12*sc,fontSize:14*sc,opacity:pinInput.length>=4?1:0.4}}>Unlock</button>
         <button onClick={()=>{setPinModal(null);setPinInput("")}} style={{...B("g"),width:"100%",marginTop:8,justifyContent:"center"}}>Cancel</button>
       </div>
     </div>}
