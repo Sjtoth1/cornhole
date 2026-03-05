@@ -2466,7 +2466,7 @@ function cleanMsg(text){
 
 // ── Main App ──
 function App(){
-  const[theme,setTheme]=useState("dark");
+  const[theme,setTheme]=useState("hc");
   const[phase,setPhase]=useState("reg");
   const[teams,setTeams]=useState([]);
   const[boards,setBoards]=useState(4);
@@ -2565,10 +2565,21 @@ function App(){
     beat();const i=setInterval(beat,8000);return()=>{a=false;clearInterval(i)}},[broadcasting,spectator,offlineMode]);
 
   // Monitor heartbeat - detect if another session took over
+  const wasMasterRef=useRef(false);
   useEffect(()=>{if(spectator||!broadcasting)return;let a=true;
     const check=async()=>{if(!a)return;try{const r=await window.storage.get(HB_KEY,true);if(r?.value){const hb=JSON.parse(r.value);setMasterInfo(hb);
-      if(hb.sid!==SESSION_ID&&Date.now()-hb.time<20000){setIsMaster(false)}else{setIsMaster(true)}}}catch{}};
-    check();const i=setInterval(check,5000);return()=>{a=false;clearInterval(i)}},[broadcasting,spectator]);
+      if(hb.sid!==SESSION_ID&&Date.now()-hb.time<20000){
+        if(wasMasterRef.current){flash("Another session took over as master","info")}
+        setIsMaster(false);wasMasterRef.current=false;
+      }else{
+        if(!wasMasterRef.current&&!spectator)flash("This session is now master","success");
+        setIsMaster(true);wasMasterRef.current=true;
+      }}}catch{}};
+    check();const i=setInterval(check,5000);return()=>{a=false;clearInterval(i)}},[broadcasting,spectator,flash]);
+
+  const takeOver=useCallback(async()=>{
+    try{await window.storage.set(HB_KEY,JSON.stringify({sid:SESSION_ID,time:Date.now()}),true);setIsMaster(true);wasMasterRef.current=true;flash("You are now master!","success")}catch{flash("Takeover failed","error")}
+  },[flash]);
 
   // Spectator poll
   useEffect(()=>{if(!spectator)return;let a=true;const poll=async()=>{try{const r=await window.storage.get(LIVE_KEY,true);if(!a)return;if(r?.value){setSpecData(JSON.parse(r.value));setSpecConn(true)}else setSpecConn(false)}catch{if(a)setSpecConn(false)}};
@@ -2834,34 +2845,75 @@ function App(){
     </div>}
 
     {/* SPECTATOR */}
-    {spectator&&<div style={{padding:20*sc,textAlign:"center"}}>
+    {spectator&&<div style={{padding:16*sc}}>
       <div style={{display:"flex",justifyContent:"center",gap:6,marginBottom:12*sc}}>
         {[["dark","Dark"],["light","Light"],["hc","HC"],["sun","Sun"]].map(([k,l])=>
           <button key={k} onClick={()=>setTheme(k)} style={{padding:`${4*sc}px ${10*sc}px`,borderRadius:6,border:`1px solid ${theme===k?C.accent:C.border}`,
             background:theme===k?C.accentSoft:"transparent",color:theme===k?C.accent:C.dim,cursor:"pointer",fontSize:10*sc,fontWeight:600}}>{l}</button>)}
       </div>
-      <div style={{padding:`${12*sc}px`,marginBottom:16*sc,background:C.blueBg,borderRadius:10,border:`1px solid ${C.blue}44`,display:"inline-flex",alignItems:"center",gap:8}}>
-        <span style={{width:8,height:8,borderRadius:"50%",background:specConn?C.W:C.red,animation:specConn?"pulse 2s infinite":"none"}}/>
-        <span style={{fontSize:13*sc,fontWeight:700,color:specConn?C.W:C.red}}>{specConn?"Connected":"Waiting for broadcast..."}</span>
+      <div style={{display:"flex",justifyContent:"center",marginBottom:16*sc}}>
+        <div style={{padding:`${8*sc}px ${16*sc}px`,background:C.blueBg,borderRadius:10,border:`1px solid ${C.blue}44`,display:"inline-flex",alignItems:"center",gap:8}}>
+          <span style={{width:8,height:8,borderRadius:"50%",background:specConn?C.W:C.red,animation:specConn?"pulse 2s infinite":"none"}}/>
+          <span style={{fontSize:13*sc,fontWeight:700,color:specConn?C.W:C.red}}>{specConn?"Connected":"Waiting for broadcast..."}</span>
+          {specData?.broadcastAt&&<span style={{fontSize:9*sc,color:C.dim}}>Updated {new Date(specData.broadcastAt).toLocaleTimeString()}</span>}
+        </div>
       </div>
-      {specData?.bracket?.matches?<div style={{textAlign:"left"}}>
-        {specData.bracket.matches.filter(m=>m.status==="active"||m.status==="done").map(m=>{
-          const n=id=>specData.teams?.find(t=>t.id===id)?.name||"TBD";
+      {specData?.bracket?.matches?(()=>{
+        const sb=specData.bracket,sm=sb.matches,sn=id=>specData.teams?.find(t=>t.id===id)?.name||"TBD";
+        const sR=sb.R||Math.log2(sb.p),slR=sb.lbR||0;
+        // Build rounds
+        const swR=[];for(let r=1;r<=sR;r++)swR.push(sm.filter(m=>m.bracket==="W"&&m.round===r));
+        const slRs=[];for(let r=1;r<=slR;r++)slRs.push(sm.filter(m=>m.bracket==="L"&&m.round===r));
+        const sgf=sm.find(m=>m.bracket==="GF"),sgfr=sm.find(m=>m.bracket==="GFR");
+        const sActive=sm.filter(m=>m.status==="active").length;
+        // Champion check
+        const sCh=(()=>{if(specData.phase!=="done")return null;
+          if(sgfr?.status==="done")return sn(sgfr.winnerId);if(sgf?.status==="done"&&sgf.winnerId===sgf.t1)return sn(sgf.winnerId);return null})();
+        // Render read-only match cell
+        const smc=(m,posXY,big)=>{if(!m)return null;
           const bc=m.bracket==="W"?C.W:m.bracket==="L"?C.L:C.purple,bcBg=m.bracket==="W"?C.WBg:m.bracket==="L"?C.LBg:C.purpleBg;
-          return <div key={m.id} style={{background:C.card,borderRadius:8,border:`1px solid ${C.border}`,borderLeft:`4px solid ${bc}`,padding:`${8*sc}px ${12*sc}px`,marginBottom:6,maxWidth:340,
-            boxShadow:m.status==="active"?`0 0 12px ${C.blueBg}`:`0 1px 3px ${C.shadow}`}}>
-            <div style={{display:"flex",gap:5,alignItems:"center",marginBottom:4*sc}}>
-              <span style={{fontSize:9*sc,fontWeight:800,color:bc,textTransform:"uppercase",padding:`1px ${5*sc}px`,background:bcBg,borderRadius:3}}>{m.bracket==="GF"?"GF":`${m.bracket}R${m.round}`}</span>
-              {m.board&&<span style={{fontSize:10*sc,fontWeight:900,color:"#FFF",padding:`2px ${7*sc}px`,background:C.blue,borderRadius:4}}>Board {m.board}</span>}
-              {m.status==="done"&&<span style={{fontSize:8*sc,color:C.dim}}>FINAL</span>}
+          const live=m.status==="active",done=m.status==="done",pend=m.status==="pending";
+          const st=posXY?{position:"absolute",left:posXY.x,top:posXY.y,width:mW}:{width:big?mW*1.3:mW};
+          return <div key={m.id} style={{...st,background:live?C.cardHi:C.card,borderRadius:8,border:`1px solid ${live?C.blue:C.border}`,borderLeft:`4px solid ${bc}`,
+            padding:`${6*sc}px ${10*sc}px`,opacity:pend?0.3:1,boxShadow:live?`0 0 16px ${C.blueBg}`:`0 1px 3px ${C.shadow}`,transition:"all 0.15s"}}>
+            <div style={{display:"flex",gap:4,alignItems:"center",marginBottom:4*sc,flexWrap:"wrap"}}>
+              <span style={{fontSize:8*sc,fontWeight:800,color:bc,textTransform:"uppercase",letterSpacing:"0.06em",padding:`1px ${5*sc}px`,background:bcBg,borderRadius:3}}>
+                {m.bracket==="GF"?"Grand Final":m.bracket==="GFR"?"GF Reset":`${m.bracket}R${m.round}`}</span>
+              {m.board&&<span style={{fontSize:11*sc,fontWeight:900,color:"#FFF",padding:`2px ${8*sc}px`,background:C.blue,borderRadius:4}}>Board {m.board}</span>}
+              {live&&<span style={{width:5*sc,height:5*sc,borderRadius:"50%",background:C.blue,animation:"pulse 1.5s infinite",display:"inline-block"}}/>}
+              {done&&m.winnerId&&<span style={{fontSize:8*sc,color:C.dim}}>FINAL</span>}
             </div>
-            {[["t1","s1"],["t2","s2"]].map(([tk,sk])=>{const isW=m.status==="done"&&m.winnerId===m[tk];return(
-              <div key={tk} style={{display:"flex",justifyContent:"space-between",padding:`${3*sc}px ${6*sc}px`,borderRadius:4,background:isW?bcBg:"transparent"}}>
-                <span style={{fontSize:13*sc,fontWeight:isW?800:500}}>{n(m[tk])}{isW?" \u2713":""}</span>
-                <span style={{fontSize:14*sc,fontWeight:900,color:isW?bc:C.text}}>{m[sk]!=null?m[sk]:""}</span>
+            {[["t1","s1"],["t2","s2"]].map(([tk,sk])=>{const isW=done&&m.winnerId===m[tk];return(
+              <div key={tk} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:`${3*sc}px ${6*sc}px`,borderRadius:4,marginBottom:1,
+                background:isW?bcBg:"transparent",borderLeft:isW?`3px solid ${bc}`:"3px solid transparent"}}>
+                <span style={{fontSize:12*sc,fontWeight:isW?800:500,color:!m[tk]?C.dimmer:C.text,maxWidth:mW*0.62,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                  {sn(m[tk])}{isW?" \u2713":""}</span>
+                <span style={{fontSize:14*sc,fontWeight:900,fontVariantNumeric:"tabular-nums",color:isW?bc:C.text}}>{m[sk]!=null?m[sk]:""}</span>
               </div>)})}
-          </div>})}
-      </div>:<div style={{padding:32,color:C.dim,fontSize:14*sc}}>No broadcast detected. Organizer needs to enable broadcasting in Settings.</div>}
+          </div>};
+        // Render section with SVG connectors
+        const ssec=(label,color,rounds)=>{const{pos,conns,tW,tH}=doLayout(rounds);
+          return <div style={{marginBottom:24*sc}}>
+            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8*sc}}><div style={{width:4,height:16*sc,borderRadius:2,background:color}}/>
+              <span style={{fontSize:13*sc,fontWeight:800,textTransform:"uppercase",letterSpacing:"0.08em",color}}>{label}</span></div>
+            <div style={{overflowX:"auto",paddingBottom:8*sc}}><div style={{position:"relative",width:tW+20,height:tH+10,minWidth:tW+20}}>
+              <svg style={{position:"absolute",top:0,left:0,width:tW+20,height:tH+10,pointerEvents:"none"}}>
+                {conns.map((c,i)=><line key={i} x1={c.x1} y1={c.y1} x2={c.x2} y2={c.y2} stroke={C.line} strokeWidth={1.5*sc}/>)}</svg>
+              {rounds.flat().map(m=>pos[m.id]?smc(m,pos[m.id]):null)}</div></div></div>};
+        return <div>
+          {sCh&&<div style={{textAlign:"center",padding:`${24*sc}px`,marginBottom:20*sc,background:`linear-gradient(135deg,${C.purpleBg},${C.WBg})`,borderRadius:14,border:`2px solid ${C.purple}`,boxShadow:`0 4px 30px ${C.purpleBg}`}}>
+            <div style={{fontSize:11*sc,color:C.purple,fontWeight:800,textTransform:"uppercase",letterSpacing:"0.15em",marginBottom:4}}>{"\ud83c\udfc6"} Tournament Champion {"\ud83c\udfc6"}</div>
+            <div style={{fontSize:30*sc,fontWeight:900}}>{sCh}</div></div>}
+          {sActive>0&&<div style={{display:"flex",alignItems:"center",gap:6,marginBottom:16*sc}}>
+            <span style={{display:"flex",alignItems:"center",gap:5,fontSize:12*sc,fontWeight:700,color:C.blue,padding:`4px ${10*sc}px`,background:C.blueBg,borderRadius:6}}>
+              <span style={{width:6,height:6,borderRadius:"50%",background:C.blue,animation:"pulse 1.5s infinite"}}/>{sActive} game{sActive!==1?"s":""} live</span></div>}
+          {ssec("Winners' Bracket",C.W,swR)}
+          {slRs.length>0&&ssec("Losers' Bracket",C.L,slRs)}
+          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8*sc}}><div style={{width:4,height:16*sc,borderRadius:2,background:C.purple}}/>
+            <span style={{fontSize:13*sc,fontWeight:800,textTransform:"uppercase",letterSpacing:"0.08em",color:C.purple}}>Grand Final</span></div>
+          <div style={{display:"flex",gap:16*sc,flexWrap:"wrap"}}>{sgf&&smc(sgf,null,true)}{sgfr&&(sgfr.status!=="pending"||sgf?.status==="done")&&smc(sgfr,null,true)}</div>
+        </div>;
+      })():<div style={{padding:32,color:C.dim,fontSize:14*sc,textAlign:"center"}}>No broadcast detected. Organizer needs to enable broadcasting.</div>}
     </div>}
 
     {/* REGISTRATION */}
@@ -3017,7 +3069,8 @@ function App(){
               background:isOnline?C.WBg:C.redBg,color:isOnline?C.W:C.red}}>{isOnline?"Online":"Offline"}</span>
           </div>
           {!isMaster&&masterInfo&&<div style={{fontSize:10*sc,color:C.L,marginBottom:8}}>
-            Another admin session is broadcasting. This session will take over if it goes silent for 20 seconds.
+            Another admin session is broadcasting. It will auto-handoff if silent for 20s.
+            <button onClick={()=>ask("Take over as master?","The other session will be notified it lost master status.",takeOver)} style={{...B("sr"),marginTop:6,width:"100%",justifyContent:"center"}}>Take Over Now</button>
           </div>}
           {/* Offline mode toggle */}
           <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10,padding:"6px 0",borderTop:`1px solid ${C.border}22`}}>
