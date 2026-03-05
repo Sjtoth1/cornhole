@@ -2657,7 +2657,10 @@ function App(){
     for(const m of br.matches.filter(m=>m.status==="ready")){let bd=null;for(let i=1;i<=boards;i++){if(!used.has(i)){bd=i;break}}if(!bd)break;m.status="active";m.board=bd;used.add(bd);ch=true}return ch},[boards]);
 
   const assignBd=useCallback((mid,bd)=>{if(!bracket)return;const m=bracket.matches.find(x=>x.id===mid);if(!m)return;
-    m.status="active";m.board=bd;setBracket({...bracket});setModal(null);flash(`Assigned to Board ${bd}`,"success")},[bracket,flash]);
+    // If another match is on this board, unassign it first
+    const other=bracket.matches.find(x=>x.id!==mid&&x.status==="active"&&x.board===bd);
+    if(other){other.board=null;other.status="ready"}
+    m.status="active";m.board=bd;setBracket({...bracket});setModal(null);setConfirm(null);flash(`Board ${bd}`,"success")},[bracket,flash]);
 
   const openBoardPicker=useCallback(mid=>{if(!bracket)return;setModal({type:"board",matchId:mid})},[bracket]);
 
@@ -2769,7 +2772,7 @@ function App(){
     const bc=m.bracket==="W"?C.W:m.bracket==="L"?C.L:C.purple,bcBg=m.bracket==="W"?C.WBg:m.bracket==="L"?C.LBg:C.purpleBg;
     const live=m.status==="active",ready=m.status==="ready",done=m.status==="done",pend=m.status==="pending";
     const st=posXY?{position:"absolute",left:posXY.x,top:posXY.y,width:mW}:{width:big?mW*1.3:mW};
-    return <div key={m.id} onClick={()=>{if(ready)openBoardPicker(m.id);else if(live){setModal({type:"boardOrScore",matchId:m.id})}else if(done){setModal({type:"score",matchId:m.id});sfS1(m.s1!=null?String(m.s1):"");sfS2(m.s2!=null?String(m.s2):"")}}}
+    return <div key={m.id} onClick={()=>{if(ready)openBoardPicker(m.id);else if(live||done){setModal({type:"score",matchId:m.id});sfS1(m.s1!=null?String(m.s1):"");sfS2(m.s2!=null?String(m.s2):"")}}}
       style={{...st,background:live?C.cardHi:C.card,borderRadius:8,border:`1px solid ${live?C.blue:C.border}`,borderLeft:`4px solid ${bc}`,
         padding:`${6*sc}px ${10*sc}px`,opacity:pend?0.3:1,boxShadow:live?`0 0 16px ${C.blueBg}`:`0 1px 3px ${C.shadow}`,cursor:(live||done||ready)?"pointer":"default",transition:"all 0.15s"}}>
       <div style={{display:"flex",gap:4,alignItems:"center",marginBottom:4*sc,flexWrap:"wrap"}}>
@@ -3051,8 +3054,8 @@ function App(){
 
     {/* BOARD PICKER */}
     {!spectator&&modal?.type==="board"&&(()=>{const m=bracket?.matches?.find(x=>x.id===modal.matchId);if(!m)return null;
-      const used=new Map();bracket.matches.filter(x=>x.status==="active"&&x.board).forEach(x=>used.set(x.board,tName(x.t1)+" vs "+tName(x.t2)));
-      const autoNext=(()=>{for(let i=1;i<=boards;i++)if(!used.has(i))return i;return null})();
+      const usedBoards=new Set(bracket.matches.filter(x=>x.status==="active"&&x.board).map(x=>x.board));
+      const autoNext=(()=>{for(let i=1;i<=boards;i++)if(!usedBoards.has(i))return i;return null})();
       return <div style={OV} onClick={e=>{if(e.target===e.currentTarget)setModal(null)}}><div style={{...CD,maxWidth:360,width:"92%",padding:24}}>
         <div style={{display:"flex",justifyContent:"space-between",marginBottom:12}}>
           <div><div style={{fontSize:10*sc,color:C.dim,textTransform:"uppercase"}}>{m.bracket==="GF"?"Grand Final":`${m.bracket==="W"?"Winners'":"Losers'"} R${m.round}`}</div>
@@ -3063,33 +3066,21 @@ function App(){
           style={{...B("a"),width:"100%",justifyContent:"center",padding:12*sc,fontSize:14*sc,marginBottom:12}}>
           Auto: Board {autoNext}</button>}
         <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(64px,1fr))",gap:6}}>
-          {Array.from({length:boards},(_,i)=>i+1).map(bd=>{const busy=used.get(bd);
-            return <button key={bd} onClick={()=>{if(busy){ask(`Board ${bd} is in use`,`${busy} is on this board. Reassign anyway?`,()=>assignBd(m.id,bd))}else assignBd(m.id,bd)}}
-              style={{padding:`${10*sc}px 4px`,borderRadius:8,border:`2px solid ${busy?C.border:C.accent}`,
-                background:busy?C.input:C.accentSoft,cursor:"pointer",textAlign:"center",transition:"all 0.12s"}}>
-              <div style={{fontSize:18*sc,fontWeight:900,color:busy?C.dim:C.accent}}>{bd}</div>
-              <div style={{fontSize:7*sc,color:busy?C.red:C.W,fontWeight:700,textTransform:"uppercase",marginTop:2}}>{busy?"In use":"Open"}</div>
+          {Array.from({length:boards},(_,i)=>i+1).map(bd=>{const busyMatch=bracket.matches.find(x=>x.id!==m.id&&x.status==="active"&&x.board===bd);const busyLabel=busyMatch?`${tName(busyMatch.t1)} vs ${tName(busyMatch.t2)}`:null;
+            return <button key={bd} onClick={()=>{if(busyMatch){ask(`Board ${bd} in use`,`${busyLabel} will be sent back to queue.`,()=>assignBd(m.id,bd))}else assignBd(m.id,bd)}}
+              style={{padding:`${10*sc}px 4px`,borderRadius:8,border:`2px solid ${busyMatch?C.border:C.accent}`,
+                background:busyMatch?C.input:C.accentSoft,cursor:"pointer",textAlign:"center",transition:"all 0.12s"}}>
+              <div style={{fontSize:18*sc,fontWeight:900,color:busyMatch?C.dim:C.accent}}>{bd}</div>
+              <div style={{fontSize:7*sc,color:busyMatch?C.red:C.W,fontWeight:700,textTransform:"uppercase",marginTop:2}}>{busyMatch?"In use":"Open"}</div>
             </button>})}
         </div>
         {!autoNext&&<div style={{fontSize:11*sc,color:C.L,textAlign:"center",marginTop:10}}>All boards in use. Pick one to reassign.</div>}
       </div></div>})()}
 
-    {/* BOARD OR SCORE (active match) */}
-    {!spectator&&modal?.type==="boardOrScore"&&(()=>{const m=bracket?.matches?.find(x=>x.id===modal.matchId);if(!m)return null;
-      return <div style={OV} onClick={e=>{if(e.target===e.currentTarget)setModal(null)}}><div style={{...CD,maxWidth:300,width:"90%",padding:24,textAlign:"center"}}>
-        <div style={{fontSize:10*sc,color:C.dim,textTransform:"uppercase",marginBottom:4}}>{m.bracket==="GF"?"Grand Final":`${m.bracket==="W"?"Winners'":"Losers'"} R${m.round}`} {"\u2022"} Board {m.board}</div>
-        <div style={{fontSize:15*sc,fontWeight:800,marginBottom:16}}>{tName(m.t1)} vs {tName(m.t2)}</div>
-        <div style={{display:"flex",flexDirection:"column",gap:8}}>
-          <button onClick={()=>{setModal({type:"score",matchId:m.id});sfS1(m.s1!=null?String(m.s1):"");sfS2(m.s2!=null?String(m.s2):"")}}
-            style={{...B("a"),width:"100%",justifyContent:"center",padding:12*sc,fontSize:14*sc}}>Enter Score</button>
-          <button onClick={()=>setModal({type:"board",matchId:m.id})}
-            style={{...B("c"),width:"100%",justifyContent:"center",padding:10*sc,fontSize:12*sc}}>Change Board</button>
-          <button onClick={()=>setModal(null)} style={{...B("g"),width:"100%",justifyContent:"center"}}>Cancel</button>
-        </div>
-      </div></div>})()}
-
     {/* SCORE MODAL */}
     {!spectator&&modal?.type==="score"&&(()=>{const m=bracket?.matches?.find(x=>x.id===modal.matchId);if(!m)return null;const dn=m.status==="done";
+      const s2Ref={current:null};
+      const doSubmit=()=>{dn?editScore(m.id,fS1,fS2):completeMatch(m.id,fS1,fS2)};
       return <div style={OV} onClick={e=>{if(e.target===e.currentTarget)setModal(null)}}><div style={{...CD,maxWidth:400,width:"92%",padding:24}}>
         <div style={{display:"flex",justifyContent:"space-between",marginBottom:16}}>
           <div><div style={{fontSize:10*sc,color:C.dim,textTransform:"uppercase"}}>{m.bracket==="GF"?"Grand Final":m.bracket==="GFR"?"GF Reset":`${m.bracket==="W"?"Winners'":"Losers'"} R${m.round}`}{m.board?` \u2022 Board ${m.board}`:""}</div>
@@ -3101,15 +3092,15 @@ function App(){
             <input value={fS1} onChange={e=>sfS1(e.target.value.replace(/\D/g,""))} placeholder="0" autoFocus
               inputMode="numeric" pattern="[0-9]*"
               style={{...I,textAlign:"center",fontSize:40*sc,fontWeight:900,padding:`${14*sc}px 8px`,fontVariantNumeric:"tabular-nums"}}
-              onKeyDown={e=>{if(e.key==="Enter")dn?editScore(m.id,fS1,fS2):completeMatch(m.id,fS1,fS2)}}/>
+              onKeyDown={e=>{if(e.key==="Enter"){e.preventDefault();if(s2Ref.current)s2Ref.current.focus()}}}/>
           </div>
           <div style={{fontSize:24*sc,color:C.dimmer,fontWeight:800,paddingTop:28}}>{"\u2014"}</div>
           <div style={{textAlign:"center"}}>
             <div style={{fontSize:12*sc,fontWeight:700,color:C.L,marginBottom:8,textTransform:"uppercase"}}>{tName(m.t2)}</div>
-            <input value={fS2} onChange={e=>sfS2(e.target.value.replace(/\D/g,""))} placeholder="0"
+            <input ref={el=>{s2Ref.current=el}} value={fS2} onChange={e=>sfS2(e.target.value.replace(/\D/g,""))} placeholder="0"
               inputMode="numeric" pattern="[0-9]*"
               style={{...I,textAlign:"center",fontSize:40*sc,fontWeight:900,padding:`${14*sc}px 8px`,fontVariantNumeric:"tabular-nums"}}
-              onKeyDown={e=>{if(e.key==="Enter")dn?editScore(m.id,fS1,fS2):completeMatch(m.id,fS1,fS2)}}/>
+              onKeyDown={e=>{if(e.key==="Enter"){e.preventDefault();doSubmit()}}}/>
           </div>
         </div>
         {(()=>{if(!fS1||!fS2)return null;const s1=parseInt(fS1),s2=parseInt(fS2);if(isNaN(s1)||isNaN(s2))return null;
@@ -3119,8 +3110,10 @@ function App(){
             {v.warn&&<div style={{fontSize:11*sc,color:C.L,marginTop:4}}>{v.warn}</div>}
           </div>})()}
         {(()=>{const s1=parseInt(fS1),s2=parseInt(fS2);const v=(fS1&&fS2&&!isNaN(s1)&&!isNaN(s2))?valScore(s1,s2):null;const ok=v?.ok;
-          return <button onClick={()=>dn?editScore(m.id,fS1,fS2):completeMatch(m.id,fS1,fS2)} disabled={!ok}
+          return <button onClick={doSubmit} disabled={!ok}
             style={{...B("a"),width:"100%",padding:12*sc,fontSize:14*sc,opacity:ok?1:0.35}}>{dn?"Update Score":"Submit Score"}</button>})()}
+        {m.status==="active"&&<button onClick={()=>setModal({type:"board",matchId:m.id})}
+          style={{...B("g"),width:"100%",marginTop:8,justifyContent:"center",fontSize:11*sc}}>Change Board (currently {m.board})</button>}
       </div></div>})()}
 
     {/* SETTINGS */}
