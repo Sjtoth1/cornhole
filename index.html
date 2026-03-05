@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>Game On Cornhole - Cranberry CUP</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#127942;</text></svg>">
-<style>html,body,#root{margin:0;padding:0;height:100%}body{font-family:'Segoe UI',system-ui,sans-serif;background:#080B10}</style>
+<style>html,body,#root{margin:0;padding:0;height:100%}body{font-family:'Segoe UI',system-ui,sans-serif;background:#000}</style>
 </head>
 <body>
 <div id="root"></div>
@@ -31,7 +31,7 @@ var FIREBASE_CONFIG = {
   function lsSet(k,v,sh){try{localStorage.setItem((sh?SHARED_PREFIX:PREFIX)+k,v);return{key:k,value:v,shared:!!sh}}catch{return null}}
   function lsDel(k,sh){try{localStorage.removeItem((sh?SHARED_PREFIX:PREFIX)+k);return{key:k,deleted:true,shared:!!sh}}catch{return null}}
   function lsList(pfx,sh){try{var full=(sh?SHARED_PREFIX:PREFIX)+(pfx||''),base=sh?SHARED_PREFIX:PREFIX,keys=[];for(var i=0;i<localStorage.length;i++){var k=localStorage.key(i);if(k.startsWith(full))keys.push(k.slice(base.length))}return{keys:keys,shared:!!sh}}catch{return{keys:[]}}}
-  try{if(typeof firebase!=='undefined'&&FIREBASE_CONFIG.apiKey&&!FIREBASE_CONFIG.apiKey.startsWith('PASTE')){firebase.initializeApp(FIREBASE_CONFIG);fbDb=firebase.database();console.log('[Firebase] Connected to',FIREBASE_CONFIG.projectId)}else{console.log('[Firebase] No config. localStorage only.')}}catch(e){console.warn('[Firebase]',e.message)}
+  try{if(typeof firebase!=='undefined'&&FIREBASE_CONFIG.apiKey){firebase.initializeApp(FIREBASE_CONFIG);fbDb=firebase.database();console.log('[Firebase] Connected to',FIREBASE_CONFIG.projectId)}else{console.log('[Firebase] Not available. localStorage only.')}}catch(e){console.warn('[Firebase]',e.message)}
   window.storage={
     get:async function(key,shared){if(shared&&fbDb){try{var snap=await fbDb.ref('shared/'+safePath(key)).once('value');var val=snap.val();if(val!==null){lsSet(key,val,true);return{key:key,value:val,shared:true}}}catch{}return lsGet(key,true)}return lsGet(key,shared)},
     set:async function(key,value,shared){lsSet(key,value,shared);if(shared&&fbDb){try{await fbDb.ref('shared/'+safePath(key)).set(value)}catch{}}return{key:key,value:value,shared:!!shared}},
@@ -41,7 +41,21 @@ var FIREBASE_CONFIG = {
 })();
 </script>
 <script type="text/babel" data-type="module">
+const React = window.React;
 const { useState, useCallback, useRef, useEffect, useMemo } = React;
+
+// ── Error Boundary ── Catches render crashes, shows recovery screen instead of white page
+class ErrorBoundary extends React.Component {
+  constructor(props){super(props);this.state={hasError:false,error:null}}
+  static getDerivedStateFromError(error){return{hasError:true,error}}
+  render(){if(this.state.hasError)return React.createElement("div",{style:{minHeight:"100vh",background:"#000",color:"#FF4444",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:40,fontFamily:"'Segoe UI',system-ui,sans-serif",textAlign:"center"}},
+    React.createElement("div",{style:{fontSize:48,marginBottom:16}},"⚠️"),
+    React.createElement("div",{style:{fontSize:22,fontWeight:800,marginBottom:12}},"Something went wrong"),
+    React.createElement("div",{style:{fontSize:14,color:"#AAA",marginBottom:24,maxWidth:500}},String(this.state.error?.message||"Unknown error")),
+    React.createElement("button",{onClick:()=>{this.setState({hasError:false,error:null})},style:{padding:"12px 32px",borderRadius:8,border:"none",background:"#00D4AA",color:"#000",fontSize:16,fontWeight:700,cursor:"pointer"}},"Try Again"),
+    React.createElement("button",{onClick:()=>{try{localStorage.clear()}catch{};window.location.reload()},style:{marginTop:12,padding:"8px 24px",borderRadius:8,border:"1px solid #444",background:"transparent",color:"#888",fontSize:12,cursor:"pointer"}},"Full Reset (clears all data)"));
+    return this.props.children}
+}
 
 // ── Utilities ──
 const np2 = n => { let p = 1; while (p < n) p *= 2; return p; };
@@ -2465,6 +2479,8 @@ function cleanMsg(text){
 }
 
 // ── Main App ──
+function AppWrapper(){return <ErrorBoundary><App/></ErrorBoundary>}
+
 function App(){
   const[theme,setTheme]=useState("hc");
   const[phase,setPhase]=useState("reg");
@@ -2587,10 +2603,19 @@ function App(){
 
   // Chat poll - auto-expire messages older than 30 min
   useEffect(()=>{let a=true;
-    const pollChat=async()=>{try{const r=await window.storage.get(CHAT_KEY,true);if(!a)return;
-      if(r?.value){const raw=JSON.parse(r.value);const now=Date.now();const msgs=raw.filter(m=>now-m.time<30*60*1000);
-        if(msgs.length<raw.length)try{await window.storage.set(CHAT_KEY,JSON.stringify(msgs),true)}catch{}
-        setChatMsgs(prev=>{if(JSON.stringify(prev)!==JSON.stringify(msgs)){if(!chatOpen&&msgs.length>prev.length)setChatUnread(u=>u+msgs.length-prev.length);return msgs}return prev})}}catch{}};
+    const pollChat=async()=>{
+      try{
+        const r=await window.storage.get(CHAT_KEY,true);if(!a)return;
+        if(r?.value){
+          try{
+            const raw=JSON.parse(r.value);const now=Date.now();
+            const msgs=raw.filter(m=>now-m.time<30*60*1000);
+            if(msgs.length<raw.length)try{await window.storage.set(CHAT_KEY,JSON.stringify(msgs),true)}catch{}
+            setChatMsgs(prev=>{if(JSON.stringify(prev)!==JSON.stringify(msgs)){if(!chatOpen&&msgs.length>prev.length)setChatUnread(u=>u+msgs.length-prev.length);return msgs}return prev})
+          }catch{}
+        }
+      }catch{}
+    };
     pollChat();const i=setInterval(pollChat,3000);return()=>{a=false;clearInterval(i)}},[chatOpen]);
 
   const sendChat=useCallback(async()=>{
@@ -2631,10 +2656,10 @@ function App(){
   const doAA=useCallback(br=>{if(!br)return false;const used=new Set(br.matches.filter(m=>m.status==="active"&&m.board).map(m=>m.board));let ch=false;
     for(const m of br.matches.filter(m=>m.status==="ready")){let bd=null;for(let i=1;i<=boards;i++){if(!used.has(i)){bd=i;break}}if(!bd)break;m.status="active";m.board=bd;used.add(bd);ch=true}return ch},[boards]);
 
-  const assignBd=useCallback(mid=>{if(!bracket)return;const m=bracket.matches.find(x=>x.id===mid);if(!m||m.status!=="ready")return;
-    const used=new Set(bracket.matches.filter(x=>x.status==="active"&&x.board).map(x=>x.board));let bd=null;
-    for(let i=1;i<=boards;i++){if(!used.has(i)){bd=i;break}}if(!bd){flash("All boards busy!","error");return}
-    m.status="active";m.board=bd;setBracket({...bracket})},[bracket,boards,flash]);
+  const assignBd=useCallback((mid,bd)=>{if(!bracket)return;const m=bracket.matches.find(x=>x.id===mid);if(!m)return;
+    m.status="active";m.board=bd;setBracket({...bracket});setModal(null);flash(`Assigned to Board ${bd}`,"success")},[bracket,flash]);
+
+  const openBoardPicker=useCallback(mid=>{if(!bracket)return;setModal({type:"board",matchId:mid})},[bracket]);
 
   const startTourn=useCallback(tl=>{const t=tl||teams;if(t.length<2){flash("Need 2+","error");return}
     const sh=[...t].sort(()=>Math.random()-0.5);const br=genBracket(sh);if(autoB)doAA(br);
@@ -2701,6 +2726,15 @@ function App(){
     bracket.matches.forEach(m=>{if(m.status!=="done"||!m.winnerId)return;if(st[m.winnerId])st[m.winnerId].w++;if(m.loserId&&st[m.loserId]){st[m.loserId].l++;if(st[m.loserId].l>=2)st[m.loserId].elim=true;else st[m.loserId].inL=true}});
     return Object.values(st).sort((a,b)=>{if(a.elim!==b.elim)return a.elim?1:-1;return b.w-a.w||a.l-b.l})},[bracket,teams]);
 
+  // Tournament progress
+  const progress=useMemo(()=>{if(!bracket?.matches)return null;const total=bracket.matches.length;const done=bracket.matches.filter(m=>m.status==="done").length;
+    return{done,total,pct:total?Math.round(done/total*100):0}},[bracket]);
+
+  // Memoized QR SVG
+  const qrSvg=useMemo(()=>{if(!shareUrl)return null;const qr=makeQR(shareUrl);if(!qr)return null;
+    const{grid:g,size:sz}=qr;const rects=[];g.forEach((row,r)=>row.forEach((v,c)=>{if(v)rects.push({r,c})}));
+    return{rects,sz}},[shareUrl]);
+
   // ── Layout ──
   const mW=~~(220*sc),mH=~~(68*sc),gV=~~(10*sc),cW=~~(40*sc);
   const doLayout=useCallback(rounds=>{const pos={},conns=[];
@@ -2735,7 +2769,7 @@ function App(){
     const bc=m.bracket==="W"?C.W:m.bracket==="L"?C.L:C.purple,bcBg=m.bracket==="W"?C.WBg:m.bracket==="L"?C.LBg:C.purpleBg;
     const live=m.status==="active",ready=m.status==="ready",done=m.status==="done",pend=m.status==="pending";
     const st=posXY?{position:"absolute",left:posXY.x,top:posXY.y,width:mW}:{width:big?mW*1.3:mW};
-    return <div key={m.id} onClick={()=>{if(ready)assignBd(m.id);else if(live||done){setModal({type:"score",matchId:m.id});sfS1(m.s1!=null?String(m.s1):"");sfS2(m.s2!=null?String(m.s2):"")}}}
+    return <div key={m.id} onClick={()=>{if(ready)openBoardPicker(m.id);else if(live){setModal({type:"boardOrScore",matchId:m.id})}else if(done){setModal({type:"score",matchId:m.id});sfS1(m.s1!=null?String(m.s1):"");sfS2(m.s2!=null?String(m.s2):"")}}}
       style={{...st,background:live?C.cardHi:C.card,borderRadius:8,border:`1px solid ${live?C.blue:C.border}`,borderLeft:`4px solid ${bc}`,
         padding:`${6*sc}px ${10*sc}px`,opacity:pend?0.3:1,boxShadow:live?`0 0 16px ${C.blueBg}`:`0 1px 3px ${C.shadow}`,cursor:(live||done||ready)?"pointer":"default",transition:"all 0.15s"}}>
       <div style={{display:"flex",gap:4,alignItems:"center",marginBottom:4*sc,flexWrap:"wrap"}}>
@@ -2795,25 +2829,25 @@ function App(){
           {lastSave&&<span style={{color:C.accent}}>{"\u2713"} {lastSave}</span>}
         </div>
       </div>
-      {broadcasting&&isMaster&&shareUrl&&(()=>{const qr=makeQR(shareUrl);
-        const qrPx=Math.max(80,~~(72*sc)); // never smaller than 80px
-        return qr?<div style={{display:"flex",alignItems:"center",gap:6,padding:`${4*sc}px ${10*sc}px`,flexShrink:0}}>
+      {broadcasting&&isMaster&&qrSvg&&(()=>{
+        const qrPx=Math.max(80,~~(72*sc));
+        return <div style={{display:"flex",alignItems:"center",gap:6,padding:`${4*sc}px ${10*sc}px`,flexShrink:0}}>
           <div style={{textAlign:"center"}}>
             <div style={{fontSize:Math.max(8,8*sc),fontWeight:800,color:C.red,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:2,display:"flex",alignItems:"center",justifyContent:"center",gap:4}}>
               <span style={{width:5,height:5,borderRadius:"50%",background:C.red,animation:"pulse 1.5s infinite"}}/>Live Bracket</div>
             <div style={{borderRadius:4,overflow:"hidden",lineHeight:0,background:"#FFF",padding:3}}>
-              <svg width={qrPx} height={qrPx} viewBox={`0 0 ${qr.size+8} ${qr.size+8}`} style={{display:"block"}}>
-                <rect width={qr.size+8} height={qr.size+8} fill="#FFF"/>
-                {qr.grid.map((row,r)=>row.map((v,c)=>v?<rect key={`${r}-${c}`} x={c+4} y={r+4} width={1} height={1} fill="#000"/>:null))}
+              <svg width={qrPx} height={qrPx} viewBox={`0 0 ${qrSvg.sz+8} ${qrSvg.sz+8}`} style={{display:"block"}}>
+                <rect width={qrSvg.sz+8} height={qrSvg.sz+8} fill="#FFF"/>
+                {qrSvg.rects.map(p=><rect key={`${p.r}-${p.c}`} x={p.c+4} y={p.r+4} width={1} height={1} fill="#000"/>)}
               </svg>
             </div>
             <div style={{fontSize:Math.max(7,7*sc),color:C.dim,marginTop:2}}>Scan to watch</div>
           </div>
-        </div>:null})()}
+        </div>})()}
       {broadcasting&&isMaster&&!shareUrl&&<div style={{padding:`${4*sc}px ${10*sc}px`,flexShrink:0}}>
         <div style={{background:C.redBg,border:`1px solid ${C.red}44`,borderRadius:6,padding:`${4*sc}px ${8*sc}px`,fontSize:Math.max(9,9*sc),color:C.red,fontWeight:600,cursor:"pointer"}}
           onClick={()=>setModal({type:"settings"})}>
-          Paste URL in Settings to show QR
+          Set up QR in Settings
         </div>
       </div>}
       <div style={{display:"flex",gap:5,flexWrap:"wrap",alignItems:"center"}}>
@@ -2904,9 +2938,26 @@ function App(){
           {sCh&&<div style={{textAlign:"center",padding:`${24*sc}px`,marginBottom:20*sc,background:`linear-gradient(135deg,${C.purpleBg},${C.WBg})`,borderRadius:14,border:`2px solid ${C.purple}`,boxShadow:`0 4px 30px ${C.purpleBg}`}}>
             <div style={{fontSize:11*sc,color:C.purple,fontWeight:800,textTransform:"uppercase",letterSpacing:"0.15em",marginBottom:4}}>{"\ud83c\udfc6"} Tournament Champion {"\ud83c\udfc6"}</div>
             <div style={{fontSize:30*sc,fontWeight:900}}>{sCh}</div></div>}
-          {sActive>0&&<div style={{display:"flex",alignItems:"center",gap:6,marginBottom:16*sc}}>
+          {sActive>0&&<div style={{display:"flex",alignItems:"center",gap:6,marginBottom:12*sc}}>
             <span style={{display:"flex",alignItems:"center",gap:5,fontSize:12*sc,fontWeight:700,color:C.blue,padding:`4px ${10*sc}px`,background:C.blueBg,borderRadius:6}}>
               <span style={{width:6,height:6,borderRadius:"50%",background:C.blue,animation:"pulse 1.5s infinite"}}/>{sActive} game{sActive!==1?"s":""} live</span></div>}
+          {(()=>{const sDone=sm.filter(m=>m.status==="done").length,sTotal=sm.length,sPct=sTotal?Math.round(sDone/sTotal*100):0;
+            return sTotal>0&&specData.phase!=="done"?<div style={{marginBottom:14*sc}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:4}}>
+                <span style={{fontSize:10*sc,fontWeight:700,color:C.dim,textTransform:"uppercase"}}>Progress</span>
+                <span style={{fontSize:11*sc,fontWeight:800,color:C.accent}}>{sPct}% ({sDone}/{sTotal})</span></div>
+              <div style={{height:6*sc,background:C.border,borderRadius:3*sc,overflow:"hidden"}}>
+                <div style={{height:"100%",width:`${sPct}%`,background:`linear-gradient(90deg,${C.accent},${C.W})`,borderRadius:3*sc,transition:"width 0.5s ease"}}/></div>
+            </div>:null})()}
+          {(()=>{const queued=sm.filter(m=>m.status==="ready");
+            return queued.length>0?<div style={{marginBottom:16*sc,padding:`${10*sc}px`,background:C.bg2,borderRadius:8,border:`1px solid ${C.border}`}}>
+              <div style={{fontSize:10*sc,fontWeight:700,color:C.dim,textTransform:"uppercase",marginBottom:8*sc}}>Up Next ({queued.length})</div>
+              <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>{queued.slice(0,6).map(m=>{
+                const bc=m.bracket==="W"?C.W:m.bracket==="L"?C.L:C.purple;
+                return <div key={m.id} style={{padding:`${4*sc}px ${8*sc}px`,borderRadius:6,border:`1px solid ${bc}44`,background:`${bc}08`,fontSize:11*sc}}>
+                  <span style={{fontWeight:700,color:bc}}>{m.bracket}R{m.round}</span> <span style={{color:C.text}}>{sn(m.t1)} vs {sn(m.t2)}</span>
+                </div>})}{queued.length>6&&<span style={{fontSize:10*sc,color:C.dim,padding:`${4*sc}px`}}>+{queued.length-6} more</span>}</div>
+            </div>:null})()}
           {ssec("Winners' Bracket",C.W,swR)}
           {slRs.length>0&&ssec("Losers' Bracket",C.L,slRs)}
           <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8*sc}}><div style={{width:4,height:16*sc,borderRadius:2,background:C.purple}}/>
@@ -2968,6 +3019,15 @@ function App(){
         {champion&&<div style={{textAlign:"center",padding:`${24*sc}px`,marginBottom:20*sc,background:`linear-gradient(135deg,${C.purpleBg},${C.WBg})`,borderRadius:14,border:`2px solid ${C.purple}`,boxShadow:`0 4px 30px ${C.purpleBg}`,...(showCeleb?{animation:"popIn 0.6s cubic-bezier(0.34,1.56,0.64,1)"}:{})}}>
           <div style={{fontSize:11*sc,color:C.purple,fontWeight:800,textTransform:"uppercase",letterSpacing:"0.15em",marginBottom:4}}>{"\ud83c\udfc6"} Tournament Champion {"\ud83c\udfc6"}</div>
           <div style={{fontSize:30*sc,fontWeight:900}}>{champion}</div></div>}
+        {progress&&phase!=="done"&&<div style={{marginBottom:14*sc}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:4}}>
+            <span style={{fontSize:10*sc,fontWeight:700,color:C.dim,textTransform:"uppercase"}}>Tournament Progress</span>
+            <span style={{fontSize:11*sc,fontWeight:800,color:C.accent}}>{progress.pct}% ({progress.done}/{progress.total} matches)</span>
+          </div>
+          <div style={{height:6*sc,background:C.border,borderRadius:3*sc,overflow:"hidden"}}>
+            <div style={{height:"100%",width:`${progress.pct}%`,background:`linear-gradient(90deg,${C.accent},${C.W})`,borderRadius:3*sc,transition:"width 0.5s ease"}}/>
+          </div>
+        </div>}
         <div style={{display:"flex",gap:6,marginBottom:16*sc,flexWrap:"wrap",alignItems:"center"}}>
           {activeN>0&&<span style={{display:"flex",alignItems:"center",gap:5,fontSize:12*sc,fontWeight:700,color:C.blue,padding:`4px ${10*sc}px`,background:C.blueBg,borderRadius:6}}>
             <span style={{width:6,height:6,borderRadius:"50%",background:C.blue,animation:"pulse 1.5s infinite"}}/>{activeN} live</span>}
@@ -2988,6 +3048,45 @@ function App(){
         <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:8,marginTop:32*sc,opacity:0.2}}>
           <span style={{fontSize:9*sc,fontWeight:700,color:C.brand,letterSpacing:"0.1em",textTransform:"uppercase"}}>Cranberry CUP {"\u2022"} Community Uniting People</span></div>
       </div>})()}
+
+    {/* BOARD PICKER */}
+    {!spectator&&modal?.type==="board"&&(()=>{const m=bracket?.matches?.find(x=>x.id===modal.matchId);if(!m)return null;
+      const used=new Map();bracket.matches.filter(x=>x.status==="active"&&x.board).forEach(x=>used.set(x.board,tName(x.t1)+" vs "+tName(x.t2)));
+      const autoNext=(()=>{for(let i=1;i<=boards;i++)if(!used.has(i))return i;return null})();
+      return <div style={OV} onClick={e=>{if(e.target===e.currentTarget)setModal(null)}}><div style={{...CD,maxWidth:360,width:"92%",padding:24}}>
+        <div style={{display:"flex",justifyContent:"space-between",marginBottom:12}}>
+          <div><div style={{fontSize:10*sc,color:C.dim,textTransform:"uppercase"}}>{m.bracket==="GF"?"Grand Final":`${m.bracket==="W"?"Winners'":"Losers'"} R${m.round}`}</div>
+            <div style={{fontSize:15*sc,fontWeight:800,marginTop:2}}>Assign Board</div></div>
+          <button onClick={()=>setModal(null)} style={{...B("g"),padding:"4px 8px",fontSize:16}}>{"\u2715"}</button></div>
+        <div style={{fontSize:12*sc,color:C.text,marginBottom:12}}>{tName(m.t1)} vs {tName(m.t2)}</div>
+        {autoNext&&<button onClick={()=>assignBd(m.id,autoNext)}
+          style={{...B("a"),width:"100%",justifyContent:"center",padding:12*sc,fontSize:14*sc,marginBottom:12}}>
+          Auto: Board {autoNext}</button>}
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(64px,1fr))",gap:6}}>
+          {Array.from({length:boards},(_,i)=>i+1).map(bd=>{const busy=used.get(bd);
+            return <button key={bd} onClick={()=>{if(busy){ask(`Board ${bd} is in use`,`${busy} is on this board. Reassign anyway?`,()=>assignBd(m.id,bd))}else assignBd(m.id,bd)}}
+              style={{padding:`${10*sc}px 4px`,borderRadius:8,border:`2px solid ${busy?C.border:C.accent}`,
+                background:busy?C.input:C.accentSoft,cursor:"pointer",textAlign:"center",transition:"all 0.12s"}}>
+              <div style={{fontSize:18*sc,fontWeight:900,color:busy?C.dim:C.accent}}>{bd}</div>
+              <div style={{fontSize:7*sc,color:busy?C.red:C.W,fontWeight:700,textTransform:"uppercase",marginTop:2}}>{busy?"In use":"Open"}</div>
+            </button>})}
+        </div>
+        {!autoNext&&<div style={{fontSize:11*sc,color:C.L,textAlign:"center",marginTop:10}}>All boards in use. Pick one to reassign.</div>}
+      </div></div>})()}
+
+    {/* BOARD OR SCORE (active match) */}
+    {!spectator&&modal?.type==="boardOrScore"&&(()=>{const m=bracket?.matches?.find(x=>x.id===modal.matchId);if(!m)return null;
+      return <div style={OV} onClick={e=>{if(e.target===e.currentTarget)setModal(null)}}><div style={{...CD,maxWidth:300,width:"90%",padding:24,textAlign:"center"}}>
+        <div style={{fontSize:10*sc,color:C.dim,textTransform:"uppercase",marginBottom:4}}>{m.bracket==="GF"?"Grand Final":`${m.bracket==="W"?"Winners'":"Losers'"} R${m.round}`} {"\u2022"} Board {m.board}</div>
+        <div style={{fontSize:15*sc,fontWeight:800,marginBottom:16}}>{tName(m.t1)} vs {tName(m.t2)}</div>
+        <div style={{display:"flex",flexDirection:"column",gap:8}}>
+          <button onClick={()=>{setModal({type:"score",matchId:m.id});sfS1(m.s1!=null?String(m.s1):"");sfS2(m.s2!=null?String(m.s2):"")}}
+            style={{...B("a"),width:"100%",justifyContent:"center",padding:12*sc,fontSize:14*sc}}>Enter Score</button>
+          <button onClick={()=>setModal({type:"board",matchId:m.id})}
+            style={{...B("c"),width:"100%",justifyContent:"center",padding:10*sc,fontSize:12*sc}}>Change Board</button>
+          <button onClick={()=>setModal(null)} style={{...B("g"),width:"100%",justifyContent:"center"}}>Cancel</button>
+        </div>
+      </div></div>})()}
 
     {/* SCORE MODAL */}
     {!spectator&&modal?.type==="score"&&(()=>{const m=bracket?.matches?.find(x=>x.id===modal.matchId);if(!m)return null;const dn=m.status==="done";
@@ -3083,10 +3182,10 @@ function App(){
             <div style={{fontSize:11*sc,color:C.dim,marginBottom:6}}>Hosted URL for QR code (one-time setup):</div>
             <input value={shareUrl} onChange={e=>setShareUrl(e.target.value.trim())} placeholder="e.g. https://yourname.github.io/cornhole/"
               style={{...I,padding:"6px 10px",fontSize:11*sc,marginBottom:8,fontFamily:"monospace"}}/>
-            {(()=>{const qr=shareUrl?makeQR(shareUrl):null;return shareUrl&&qr?<div style={{display:"flex",justifyContent:"center",padding:12,background:"#FFF",borderRadius:8,marginBottom:8}}>
-              <svg width={200} height={200} viewBox={`0 0 ${qr.size+8} ${qr.size+8}`} style={{display:"block"}}>
-                <rect width={qr.size+8} height={qr.size+8} fill="#FFF"/>
-                {qr.grid.map((row,r)=>row.map((v,c)=>v?<rect key={`${r}-${c}`} x={c+4} y={r+4} width={1} height={1} fill="#000"/>:null))}
+            {(()=>{return shareUrl&&qrSvg?<div style={{display:"flex",justifyContent:"center",padding:12,background:"#FFF",borderRadius:8,marginBottom:8}}>
+              <svg width={200} height={200} viewBox={`0 0 ${qrSvg.sz+8} ${qrSvg.sz+8}`} style={{display:"block"}}>
+                <rect width={qrSvg.sz+8} height={qrSvg.sz+8} fill="#FFF"/>
+                {qrSvg.rects.map(p=><rect key={`${p.r}-${p.c}`} x={p.c+4} y={p.r+4} width={1} height={1} fill="#000"/>)}
               </svg>
             </div>:null})()}
             {shareUrl&&<button onClick={()=>{try{navigator.clipboard.writeText(shareUrl);flash("Copied!","success")}catch{}}}
@@ -3287,7 +3386,7 @@ function App(){
   </div>
 }
 
-ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(App));
+ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(AppWrapper));
 </script>
 </body>
 </html>
