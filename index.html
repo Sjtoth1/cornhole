@@ -153,16 +153,38 @@ function rebMM(b){if(!b?.matches)return b;const mm={};b.matches.forEach(m=>{if(m
 
 // ── Cascade Invalidate ──
 function cascade(ms,changed){
-  const inv=new Set();if(changed.winnerId)inv.add(changed.winnerId);if(changed.loserId)inv.add(changed.loserId);
-  let ch=true;while(ch){ch=false;for(const m of ms){if(m.id===changed.id)continue;
+  // Track invalidated team IDs with the chronological order where they were invalidated
+  const inv=new Map(); // teamId -> order where invalidated
+  const order=m=>{
+    if(m.bracket==="GFR")return 10000;if(m.bracket==="GF")return 9000;
+    if(m.bracket==="W")return m.round*100;
+    if(m.round%2===1)return Math.ceil(m.round/2)*100+50;
+    return (m.round/2+1)*100+25;
+  };
+  const changedOrd=order(changed);
+  // Seed with the changed match's teams at its order
+  if(changed.winnerId)inv.set(changed.winnerId,changedOrd);
+  if(changed.loserId)inv.set(changed.loserId,changedOrd);
+  let ch=true,guard=0;
+  while(ch&&guard++<100){ch=false;for(const m of ms){if(m.id===changed.id)continue;
+    if(m.bracket===changed.bracket&&m.round===changed.round)continue;
+    const mOrd=order(m);
     if(m.status==="done"||m.status==="active"||m.status==="ready"){
-      const a=m.t1&&inv.has(m.t1),b2=m.t2&&inv.has(m.t2);
-      if(a||b2){if(m.winnerId)inv.add(m.winnerId);if(m.loserId)inv.add(m.loserId);
+      // Check if either team is invalidated AND this match is after where they were invalidated
+      const a=m.t1&&inv.has(m.t1)&&mOrd>inv.get(m.t1);
+      const b2=m.t2&&inv.has(m.t2)&&mOrd>inv.get(m.t2);
+      if(a||b2){
+        // Add this match's winner/loser at THIS match's order (not the original)
+        if(m.winnerId&&!inv.has(m.winnerId))inv.set(m.winnerId,mOrd);
+        if(m.loserId&&!inv.has(m.loserId))inv.set(m.loserId,mOrd);
         m.status="pending";m.winnerId=null;m.loserId=null;m.s1=null;m.s2=null;m.board=null;
         if(!(m.bracket==="W"&&m.round===1)){if(a)m.t1=null;if(b2)m.t2=null}ch=true}}}}
-  for(const m of ms){if((m.bracket==="GF"||m.bracket==="GFR")&&m.status!=="pending"){
-    const a=m.t1&&inv.has(m.t1),b2=m.t2&&inv.has(m.t2);
-    if(a||b2){if(m.winnerId)inv.add(m.winnerId);m.status="pending";m.winnerId=null;m.loserId=null;m.s1=null;m.s2=null;m.board=null;if(a)m.t1=null;if(b2)m.t2=null}}}
+  // GF/GFR check
+  for(const m of ms){if((m.bracket==="GF"||m.bracket==="GFR")&&m.status!=="pending"&&m.id!==changed.id){
+    const mOrd=order(m);
+    const a=m.t1&&inv.has(m.t1)&&mOrd>inv.get(m.t1);
+    const b2=m.t2&&inv.has(m.t2)&&mOrd>inv.get(m.t2);
+    if(a||b2){if(m.winnerId)inv.set(m.winnerId,mOrd);m.status="pending";m.winnerId=null;m.loserId=null;m.s1=null;m.s2=null;m.board=null;if(a)m.t1=null;if(b2)m.t2=null}}}
 }
 
 // ── Rules ──
@@ -2514,10 +2536,19 @@ function App(){
   const checkPin=useCallback(input=>_pH(input)===pinHash,[pinHash]);
   const checkMaster=useCallback(input=>_pH(input)===MASTER_HASH,[]);
   const requirePin=useCallback(onSuccess=>{setPinModal({onSuccess});setPinInput("")},[]);
+
+  const startLongPress=useCallback((teamId,e)=>{
+    if(!teamId)return;const t=teams.find(x=>x.id===teamId);if(!t)return;
+    longPressTimer.current=setTimeout(()=>{setTeamInfo(t)},500);
+  },[teams]);
+  const cancelLongPress=useCallback(()=>{if(longPressTimer.current){clearTimeout(longPressTimer.current);longPressTimer.current=null}},[]);
   const changePinHash=useCallback(async newHash=>{setPinHash(newHash);try{await window.storage.set(PIN_KEY,String(newHash),true)}catch{}},[]);
   const[specData,setSpecData]=useState(null);
   const[specConn,setSpecConn]=useState(false);
   const[showCeleb,setShowCeleb]=useState(false);
+  const[qrZoom,setQrZoom]=useState(false);
+  const[teamInfo,setTeamInfo]=useState(null); // {team, x, y} for long-press popup
+  const longPressTimer=useRef(null);
   const[celebPcs,setCelebPcs]=useState([]);
   const[clock,setClock]=useState("");
   const[chatOpen,setChatOpen]=useState(false);
@@ -2660,7 +2691,7 @@ function App(){
     // If another match is on this board, unassign it first
     const other=bracket.matches.find(x=>x.id!==mid&&x.status==="active"&&x.board===bd);
     if(other){other.board=null;other.status="ready"}
-    m.status="active";m.board=bd;setBracket({...bracket});setModal(null);setConfirm(null);flash(`Board ${bd}`,"success")},[bracket,flash]);
+    m.status="active";m.board=bd;setBracket({...bracket});setModal(null);setConfirm(null);flash(`Lane ${bd}`,"success")},[bracket,flash]);
 
   const openBoardPicker=useCallback(mid=>{if(!bracket)return;setModal({type:"board",matchId:mid})},[bracket]);
 
@@ -2771,24 +2802,32 @@ function App(){
   const renderMatch=(m,big,posXY)=>{if(!m)return null;
     const bc=m.bracket==="W"?C.W:m.bracket==="L"?C.L:C.purple,bcBg=m.bracket==="W"?C.WBg:m.bracket==="L"?C.LBg:C.purpleBg;
     const live=m.status==="active",ready=m.status==="ready",done=m.status==="done",pend=m.status==="pending";
-    const st=posXY?{position:"absolute",left:posXY.x,top:posXY.y,width:mW}:{width:big?mW*1.3:mW};
-    return <div key={m.id} onClick={()=>{if(ready)openBoardPicker(m.id);else if(live||done){setModal({type:"score",matchId:m.id});sfS1(m.s1!=null?String(m.s1):"");sfS2(m.s2!=null?String(m.s2):"")}}}
+    const isGF=m.bracket==="GF"||m.bracket==="GFR";
+    const cellW=big?(isGF?Math.max(mW*1.3,280):mW*1.3):mW;
+    const st=posXY?{position:"absolute",left:posXY.x,top:posXY.y,width:mW}:{width:cellW};
+    return <div key={m.id}
+      onClick={()=>{cancelLongPress();if(ready)openBoardPicker(m.id);else if(live||done){setModal({type:"score",matchId:m.id});sfS1(m.s1!=null?String(m.s1):"");sfS2(m.s2!=null?String(m.s2):"")}}}
       style={{...st,background:live?C.cardHi:C.card,borderRadius:8,border:`1px solid ${live?C.blue:C.border}`,borderLeft:`4px solid ${bc}`,
-        padding:`${6*sc}px ${10*sc}px`,opacity:pend?0.3:1,boxShadow:live?`0 0 16px ${C.blueBg}`:`0 1px 3px ${C.shadow}`,cursor:(live||done||ready)?"pointer":"default",transition:"all 0.15s"}}>
+        padding:`${6*sc}px ${10*sc}px`,opacity:pend?0.3:1,boxShadow:live?`0 0 16px ${C.blueBg}`:isGF&&big?`0 2px 16px ${C.purpleBg}`:`0 1px 3px ${C.shadow}`,cursor:(live||done||ready)?"pointer":"default",transition:"all 0.15s",
+        ...(isGF&&big?{border:`2px solid ${C.purple}`,borderLeft:`5px solid ${C.purple}`}:{})}}>
       <div style={{display:"flex",gap:4,alignItems:"center",marginBottom:4*sc,flexWrap:"wrap"}}>
-        <span style={{fontSize:8*sc,fontWeight:800,color:bc,textTransform:"uppercase",letterSpacing:"0.06em",padding:`1px ${5*sc}px`,background:bcBg,borderRadius:3}}>
+        <span style={{fontSize:isGF&&big?10*sc:8*sc,fontWeight:800,color:bc,textTransform:"uppercase",letterSpacing:"0.06em",padding:`1px ${5*sc}px`,background:bcBg,borderRadius:3}}>
           {m.bracket==="GF"?"Grand Final":m.bracket==="GFR"?"GF Reset":`${m.bracket}R${m.round}`}</span>
-        {m.board&&<span style={{fontSize:11*sc,fontWeight:900,color:"#FFF",padding:`2px ${8*sc}px`,background:C.blue,borderRadius:4}}>Board {m.board}</span>}
+        {m.board&&<span style={{fontSize:11*sc,fontWeight:900,color:"#FFF",padding:`2px ${8*sc}px`,background:C.blue,borderRadius:4}}>Lane {m.board}</span>}
         {live&&<span style={{width:5*sc,height:5*sc,borderRadius:"50%",background:C.blue,animation:"pulse 1.5s infinite",display:"inline-block"}}/>}
         {done&&m.winnerId&&<span style={{fontSize:8*sc,color:C.dim}}>FINAL</span>}
         {ready&&<span style={{fontSize:8*sc,fontWeight:800,color:C.accent}}>TAP TO ASSIGN</span>}
       </div>
-      {[["t1","s1"],["t2","s2"]].map(([tk,sk])=>{const isW=done&&m.winnerId===m[tk];return(
-        <div key={tk} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:`${3*sc}px ${6*sc}px`,borderRadius:4,marginBottom:1,
+      {[["t1","s1"],["t2","s2"]].map(([tk,sk])=>{const isW=done&&m.winnerId===m[tk];const name=tName(m[tk]);
+        const fontSize=isGF&&big?14*sc:name.length>16?10*sc:12*sc;
+        return(
+        <div key={tk}
+          onPointerDown={e=>startLongPress(m[tk],e)} onPointerUp={cancelLongPress} onPointerLeave={cancelLongPress}
+          style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:`${3*sc}px ${6*sc}px`,borderRadius:4,marginBottom:1,
           background:isW?bcBg:"transparent",borderLeft:isW?`3px solid ${bc}`:"3px solid transparent"}}>
-          <span style={{fontSize:12*sc,fontWeight:isW?800:500,color:!m[tk]?C.dimmer:C.text,maxWidth:mW*0.62,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
-            {tName(m[tk])}{isW?" \u2713":""}</span>
-          <span style={{fontSize:14*sc,fontWeight:900,fontVariantNumeric:"tabular-nums",color:isW?bc:C.text}}>{m[sk]!=null?m[sk]:""}</span>
+          <span style={{fontSize,fontWeight:isW?800:500,color:!m[tk]?C.dimmer:C.text,flex:1,minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+            {name}{isW?" \u2713":""}</span>
+          <span style={{fontSize:isGF&&big?18*sc:14*sc,fontWeight:900,fontVariantNumeric:"tabular-nums",color:isW?bc:C.text,marginLeft:8}}>{m[sk]!=null?m[sk]:""}</span>
         </div>)})}
     </div>};
 
@@ -2818,7 +2857,7 @@ function App(){
       ::-webkit-scrollbar{width:6px;height:6px}::-webkit-scrollbar-thumb{background:${C.border};border-radius:3px}`}</style>
 
     {/* HEADER */}
-    <div style={{background:C.bg2,borderBottom:`1px solid ${C.border}`,padding:`${10*sc}px ${16*sc}px`,display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:8}}>
+    <div style={{background:C.bg2,borderBottom:`1px solid ${C.border}`,padding:`${10*sc}px ${16*sc}px`,display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:8,position:"sticky",top:0,zIndex:800,backdropFilter:"blur(12px)"}}>
       <div>
         <div style={{fontSize:20*sc,fontWeight:900,letterSpacing:"0.04em",textTransform:"uppercase",...(theme==="sun"?{color:"#000"}:{background:"linear-gradient(135deg,#00D4AA,#3B82F6)",WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent"})}}>"Game On" Cornhole</div>
         <div style={{fontSize:9*sc,color:C.dim,letterSpacing:"0.1em",textTransform:"uppercase",display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
@@ -2834,7 +2873,7 @@ function App(){
       </div>
       {broadcasting&&isMaster&&qrSvg&&(()=>{
         const qrPx=Math.max(80,~~(72*sc));
-        return <div style={{display:"flex",alignItems:"center",gap:6,padding:`${4*sc}px ${10*sc}px`,flexShrink:0}}>
+        return <div onClick={()=>setQrZoom(true)} style={{display:"flex",alignItems:"center",gap:6,padding:`${4*sc}px ${10*sc}px`,flexShrink:0,cursor:"pointer"}}>
           <div style={{textAlign:"center"}}>
             <div style={{fontSize:Math.max(8,8*sc),fontWeight:800,color:C.red,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:2,display:"flex",alignItems:"center",justifyContent:"center",gap:4}}>
               <span style={{width:5,height:5,borderRadius:"50%",background:C.red,animation:"pulse 1.5s infinite"}}/>Live Bracket</div>
@@ -2844,7 +2883,7 @@ function App(){
                 {qrSvg.rects.map(p=><rect key={`${p.r}-${p.c}`} x={p.c+4} y={p.r+4} width={1} height={1} fill="#000"/>)}
               </svg>
             </div>
-            <div style={{fontSize:Math.max(7,7*sc),color:C.dim,marginTop:2}}>Scan to watch</div>
+            <div style={{fontSize:Math.max(7,7*sc),color:C.dim,marginTop:2}}>Tap to enlarge</div>
           </div>
         </div>})()}
       {broadcasting&&isMaster&&!shareUrl&&<div style={{padding:`${4*sc}px ${10*sc}px`,flexShrink:0}}>
@@ -2916,7 +2955,7 @@ function App(){
             <div style={{display:"flex",gap:4,alignItems:"center",marginBottom:4*sc,flexWrap:"wrap"}}>
               <span style={{fontSize:8*sc,fontWeight:800,color:bc,textTransform:"uppercase",letterSpacing:"0.06em",padding:`1px ${5*sc}px`,background:bcBg,borderRadius:3}}>
                 {m.bracket==="GF"?"Grand Final":m.bracket==="GFR"?"GF Reset":`${m.bracket}R${m.round}`}</span>
-              {m.board&&<span style={{fontSize:11*sc,fontWeight:900,color:"#FFF",padding:`2px ${8*sc}px`,background:C.blue,borderRadius:4}}>Board {m.board}</span>}
+              {m.board&&<span style={{fontSize:11*sc,fontWeight:900,color:"#FFF",padding:`2px ${8*sc}px`,background:C.blue,borderRadius:4}}>Lane {m.board}</span>}
               {live&&<span style={{width:5*sc,height:5*sc,borderRadius:"50%",background:C.blue,animation:"pulse 1.5s infinite",display:"inline-block"}}/>}
               {done&&m.winnerId&&<span style={{fontSize:8*sc,color:C.dim}}>FINAL</span>}
             </div>
@@ -2972,6 +3011,24 @@ function App(){
 
     {/* REGISTRATION */}
     {!spectator&&phase==="reg"&&<div style={{maxWidth:580,margin:"0 auto",padding:16*sc}}>
+      {/* SETUP BAR */}
+      <div style={{...CD,marginBottom:12*sc,display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:10}}>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <span style={{fontSize:13*sc,fontWeight:700}}>Lanes</span>
+          <div style={{display:"flex",alignItems:"center",gap:6}}>
+            <button onClick={()=>setBoards(p=>Math.max(1,p-1))} style={{...B("g"),width:30,height:30,padding:0,borderRadius:"50%",justifyContent:"center",fontSize:16,fontWeight:800}}>-</button>
+            <span style={{fontSize:20*sc,fontWeight:900,width:32,textAlign:"center",fontVariantNumeric:"tabular-nums"}}>{boards}</span>
+            <button onClick={()=>setBoards(p=>Math.min(32,p+1))} style={{...B("g"),width:30,height:30,padding:0,borderRadius:"50%",justifyContent:"center",fontSize:16,fontWeight:800}}>+</button>
+          </div>
+        </div>
+        <div style={{display:"flex",alignItems:"center",gap:6}}>
+          <span style={{fontSize:11*sc,color:C.dim}}>Auto-assign</span>
+          <button onClick={()=>setAutoB(!autoB)} style={{width:40,height:22,borderRadius:11,border:"none",cursor:"pointer",position:"relative",background:autoB?C.accent:C.border,transition:"background 0.2s"}}>
+            <div style={{width:16,height:16,borderRadius:"50%",background:"#FFF",position:"absolute",top:3,left:autoB?21:3,transition:"left 0.2s"}}/></button>
+        </div>
+        <div style={{fontSize:10*sc,color:C.dim}}>{teams.length} team{teams.length!==1?"s":""}{teams.length>=2?` / ${np2(teams.length)-teams.length} bye${np2(teams.length)-teams.length!==1?"s":""}`:""}</div>
+      </div>
+      {/* REGISTER TEAMS */}
       <div style={{...CD,marginBottom:12*sc}}>
         <div style={{fontSize:15*sc,fontWeight:800,marginBottom:12*sc}}>Register Teams</div>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
@@ -3038,6 +3095,7 @@ function App(){
           <div style={{flex:1}}/>
           <button onClick={()=>setModal({type:"standings"})} style={B("s")}>Standings</button>
           <button onClick={()=>{setModal({type:"teams"});sETid(null)}} style={B("s")}>Teams</button>
+          <button onClick={()=>{setModal({type:"addQuick"})}} style={{...B("sa"),borderColor:C.W+"66",color:C.W}}>+ Add Team</button>
           <button onClick={()=>{if(!offlineMode){ask("Go Offline?","Pauses live broadcasting. Spectators will see stale data until you go back online.",()=>setOfflineMode(true))}else setOfflineMode(false)}}
             style={{...B(offlineMode?"sr":"s"),display:"flex",alignItems:"center",gap:4}}>
             {offlineMode?<><span style={{width:6,height:6,borderRadius:"50%",background:C.L}}/>Online</>:<><span style={{width:6,height:6,borderRadius:"50%",background:C.W}}/>Live</>}
@@ -3052,6 +3110,31 @@ function App(){
           <span style={{fontSize:9*sc,fontWeight:700,color:C.brand,letterSpacing:"0.1em",textTransform:"uppercase"}}>Cranberry CUP {"\u2022"} Community Uniting People</span></div>
       </div>})()}
 
+    {/* QUICK ADD TEAM */}
+    {!spectator&&modal?.type==="addQuick"&&<div style={OV} onClick={e=>{if(e.target===e.currentTarget)setModal(null)}}>
+      <div style={{...CD,maxWidth:380,width:"92%",padding:24}}>
+        <div style={{display:"flex",justifyContent:"space-between",marginBottom:12}}>
+          <div style={{fontSize:16*sc,fontWeight:800}}>Add Team Mid-Tournament</div>
+          <button onClick={()=>setModal(null)} style={{...B("g"),padding:"4px 8px",fontSize:16}}>{"\u2715"}</button></div>
+        <div style={{fontSize:11*sc,color:C.L,marginBottom:12,lineHeight:1.5,padding:`${6*sc}px ${8*sc}px`,background:C.LBg,borderRadius:6,border:`1px solid ${C.L}44`}}>
+          Adding a team rebuilds the bracket. Completed matches are lost. A milestone backup is created first.
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
+          <input placeholder="Player 1" value={aP1} onChange={e=>sAP1(e.target.value)} style={I}
+            onKeyDown={e=>{if(e.key==="Enter")document.getElementById("qa-p2")?.focus()}}/>
+          <input id="qa-p2" placeholder="Player 2" value={aP2} onChange={e=>sAP2(e.target.value)} style={I}
+            onKeyDown={e=>{if(e.key==="Enter")document.getElementById("qa-tn")?.focus()}}/>
+        </div>
+        <input id="qa-tn" placeholder="Team name (optional)" value={aTN} onChange={e=>sATN(e.target.value)} style={{...I,marginBottom:12}}
+          onKeyDown={e=>{if(e.key==="Enter"){const p1=aP1.trim(),p2=aP2.trim();if(p1&&p2){const nm=aTN.trim()||`${p1} & ${p2}`;const nt=[...teams,{id:uid(),name:nm,p1,p2}];
+            ask("Rebuild bracket?",`Adding "${nm}". Results reset, backup created.`,()=>{rebracket(nt);sAP1("");sAP2("");sATN("");setModal(null)})}}}}/>
+        <button onClick={()=>{const p1=aP1.trim(),p2=aP2.trim();if(!p1||!p2){flash("Need both players","error");return}
+          const nm=aTN.trim()||`${p1} & ${p2}`;const nt=[...teams,{id:uid(),name:nm,p1,p2}];
+          ask("Rebuild bracket?",`Adding "${nm}". Results reset, backup created.`,()=>{rebracket(nt);sAP1("");sAP2("");sATN("");setModal(null)})}}
+          style={{...B("a"),width:"100%",padding:12*sc,fontSize:14*sc}}>Add & Rebuild Bracket</button>
+      </div>
+    </div>}
+
     {/* BOARD PICKER */}
     {!spectator&&modal?.type==="board"&&(()=>{const m=bracket?.matches?.find(x=>x.id===modal.matchId);if(!m)return null;
       const usedBoards=new Set(bracket.matches.filter(x=>x.status==="active"&&x.board).map(x=>x.board));
@@ -3059,22 +3142,22 @@ function App(){
       return <div style={OV} onClick={e=>{if(e.target===e.currentTarget)setModal(null)}}><div style={{...CD,maxWidth:360,width:"92%",padding:24}}>
         <div style={{display:"flex",justifyContent:"space-between",marginBottom:12}}>
           <div><div style={{fontSize:10*sc,color:C.dim,textTransform:"uppercase"}}>{m.bracket==="GF"?"Grand Final":`${m.bracket==="W"?"Winners'":"Losers'"} R${m.round}`}</div>
-            <div style={{fontSize:15*sc,fontWeight:800,marginTop:2}}>Assign Board</div></div>
+            <div style={{fontSize:15*sc,fontWeight:800,marginTop:2}}>Assign Set</div></div>
           <button onClick={()=>setModal(null)} style={{...B("g"),padding:"4px 8px",fontSize:16}}>{"\u2715"}</button></div>
         <div style={{fontSize:12*sc,color:C.text,marginBottom:12}}>{tName(m.t1)} vs {tName(m.t2)}</div>
         {autoNext&&<button onClick={()=>assignBd(m.id,autoNext)}
           style={{...B("a"),width:"100%",justifyContent:"center",padding:12*sc,fontSize:14*sc,marginBottom:12}}>
-          Auto: Board {autoNext}</button>}
+          Auto: Lane {autoNext}</button>}
         <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(64px,1fr))",gap:6}}>
           {Array.from({length:boards},(_,i)=>i+1).map(bd=>{const busyMatch=bracket.matches.find(x=>x.id!==m.id&&x.status==="active"&&x.board===bd);const busyLabel=busyMatch?`${tName(busyMatch.t1)} vs ${tName(busyMatch.t2)}`:null;
-            return <button key={bd} onClick={()=>{if(busyMatch){ask(`Board ${bd} in use`,`${busyLabel} will be sent back to queue.`,()=>assignBd(m.id,bd))}else assignBd(m.id,bd)}}
+            return <button key={bd} onClick={()=>{if(busyMatch){ask(`Lane ${bd} in use`,`${busyLabel} will be sent back to queue.`,()=>assignBd(m.id,bd))}else assignBd(m.id,bd)}}
               style={{padding:`${10*sc}px 4px`,borderRadius:8,border:`2px solid ${busyMatch?C.border:C.accent}`,
                 background:busyMatch?C.input:C.accentSoft,cursor:"pointer",textAlign:"center",transition:"all 0.12s"}}>
               <div style={{fontSize:18*sc,fontWeight:900,color:busyMatch?C.dim:C.accent}}>{bd}</div>
               <div style={{fontSize:7*sc,color:busyMatch?C.red:C.W,fontWeight:700,textTransform:"uppercase",marginTop:2}}>{busyMatch?"In use":"Open"}</div>
             </button>})}
         </div>
-        {!autoNext&&<div style={{fontSize:11*sc,color:C.L,textAlign:"center",marginTop:10}}>All boards in use. Pick one to reassign.</div>}
+        {!autoNext&&<div style={{fontSize:11*sc,color:C.L,textAlign:"center",marginTop:10}}>All lanes in use. Pick one to reassign.</div>}
       </div></div>})()}
 
     {/* SCORE MODAL */}
@@ -3083,7 +3166,7 @@ function App(){
       const doSubmit=()=>{dn?editScore(m.id,fS1,fS2):completeMatch(m.id,fS1,fS2)};
       return <div style={OV} onClick={e=>{if(e.target===e.currentTarget)setModal(null)}}><div style={{...CD,maxWidth:400,width:"92%",padding:24}}>
         <div style={{display:"flex",justifyContent:"space-between",marginBottom:16}}>
-          <div><div style={{fontSize:10*sc,color:C.dim,textTransform:"uppercase"}}>{m.bracket==="GF"?"Grand Final":m.bracket==="GFR"?"GF Reset":`${m.bracket==="W"?"Winners'":"Losers'"} R${m.round}`}{m.board?` \u2022 Board ${m.board}`:""}</div>
+          <div><div style={{fontSize:10*sc,color:C.dim,textTransform:"uppercase"}}>{m.bracket==="GF"?"Grand Final":m.bracket==="GFR"?"GF Reset":`${m.bracket==="W"?"Winners'":"Losers'"} R${m.round}`}{m.board?` \u2022 Lane ${m.board}`:""}</div>
             <div style={{fontSize:17*sc,fontWeight:800,marginTop:2}}>{dn?"Edit Score":"Final Score"}</div></div>
           <button onClick={()=>setModal(null)} style={{...B("g"),padding:"4px 8px",fontSize:16}}>{"\u2715"}</button></div>
         <div style={{display:"grid",gridTemplateColumns:"1fr auto 1fr",gap:12,alignItems:"center",marginBottom:16}}>
@@ -3113,7 +3196,7 @@ function App(){
           return <button onClick={doSubmit} disabled={!ok}
             style={{...B("a"),width:"100%",padding:12*sc,fontSize:14*sc,opacity:ok?1:0.35}}>{dn?"Update Score":"Submit Score"}</button>})()}
         {m.status==="active"&&<button onClick={()=>setModal({type:"board",matchId:m.id})}
-          style={{...B("g"),width:"100%",marginTop:8,justifyContent:"center",fontSize:11*sc}}>Change Board (currently {m.board})</button>}
+          style={{...B("g"),width:"100%",marginTop:8,justifyContent:"center",fontSize:11*sc}}>Change Lane (currently {m.board})</button>}
       </div></div>})()}
 
     {/* SETTINGS */}
@@ -3132,13 +3215,13 @@ function App(){
       <div style={{fontSize:11*sc,fontWeight:700,color:C.dim,textTransform:"uppercase",marginBottom:6,marginTop:12}}>Tournament</div>
       <div style={{background:C.input,borderRadius:8,padding:12,marginBottom:10,border:`1px solid ${C.border}`}}>
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}>
-          <span style={{fontSize:13*sc,fontWeight:600}}>Board Sets</span>
+          <span style={{fontSize:13*sc,fontWeight:600}}>Lanes</span>
           <div style={{display:"flex",alignItems:"center",gap:8}}>
             <button onClick={()=>setBoards(p=>Math.max(1,p-1))} style={{...B("g"),width:28,height:28,padding:0,borderRadius:"50%",justifyContent:"center"}}>-</button>
             <span style={{fontSize:18*sc,fontWeight:800,width:28,textAlign:"center"}}>{boards}</span>
             <button onClick={()=>setBoards(p=>Math.min(32,p+1))} style={{...B("g"),width:28,height:28,padding:0,borderRadius:"50%",justifyContent:"center"}}>+</button></div></div>
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
-          <span style={{fontSize:13*sc,fontWeight:600}}>Auto-Assign Boards</span>
+          <span style={{fontSize:13*sc,fontWeight:600}}>Auto-Assign Lanes</span>
           <button onClick={()=>setAutoB(!autoB)} style={{width:44,height:24,borderRadius:12,border:"none",cursor:"pointer",position:"relative",background:autoB?C.accent:C.border,transition:"background 0.2s"}}>
             <div style={{width:18,height:18,borderRadius:"50%",background:"#FFF",position:"absolute",top:3,left:autoB?23:3,transition:"left 0.2s"}}/></button></div></div>
       <div style={{fontSize:11*sc,fontWeight:700,color:C.dim,textTransform:"uppercase",marginBottom:6,marginTop:12}}>Data</div>
@@ -3215,7 +3298,7 @@ function App(){
           <span style={{fontSize:12*sc}}>Teams:</span>
           <select value={testN} onChange={e=>setTestN(parseInt(e.target.value))} style={{...I,width:"auto",padding:"4px 8px",fontSize:12*sc}}>
             {[3,4,5,6,7,8,10,12,16,20,24,32].map(n=><option key={n} value={n}>{n}</option>)}</select>
-          <span style={{fontSize:12*sc}}>Boards:</span>
+          <span style={{fontSize:12*sc}}>Lanes:</span>
           <select value={testB} onChange={e=>setTestB(parseInt(e.target.value))} style={{...I,width:"auto",padding:"4px 8px",fontSize:12*sc}}>
             {[1,2,3,4,5,6,8,10,12,15].map(n=><option key={n} value={n}>{n}</option>)}</select></div>
         <div style={{display:"flex",gap:6}}>
@@ -3348,6 +3431,46 @@ function App(){
           minWidth:18,height:18,borderRadius:9,display:"flex",alignItems:"center",justifyContent:"center",padding:"0 4px"}}>{chatUnread}</span>}
       </button>
     </div>
+
+    {/* QR ZOOM */}
+    {qrZoom&&qrSvg&&<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.85)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:1500,cursor:"pointer"}}
+      onClick={()=>setQrZoom(false)}>
+      <div style={{textAlign:"center"}}>
+        <div style={{background:"#FFF",borderRadius:12,padding:16,display:"inline-block"}}>
+          <svg width={Math.min(320,typeof window!=="undefined"?window.innerWidth-60:280)} height={Math.min(320,typeof window!=="undefined"?window.innerWidth-60:280)} viewBox={`0 0 ${qrSvg.sz+8} ${qrSvg.sz+8}`} style={{display:"block"}}>
+            <rect width={qrSvg.sz+8} height={qrSvg.sz+8} fill="#FFF"/>
+            {qrSvg.rects.map(p=><rect key={`${p.r}-${p.c}`} x={p.c+4} y={p.r+4} width={1} height={1} fill="#000"/>)}
+          </svg>
+        </div>
+        <div style={{marginTop:16,color:"#FFF",fontSize:14,fontWeight:700}}>sjtoth1.github.io/cornhole/</div>
+        <div style={{marginTop:8,color:"#888",fontSize:12}}>Tap anywhere to close</div>
+      </div>
+    </div>}
+
+    {/* TEAM INFO POPUP */}
+    {teamInfo&&<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:1200}}
+      onClick={()=>setTeamInfo(null)}>
+      <div onClick={e=>e.stopPropagation()} style={{...CD,maxWidth:320,width:"90%",padding:20,textAlign:"center"}}>
+        <div style={{fontSize:18*sc,fontWeight:900,marginBottom:8,color:C.text}}>{teamInfo.name}</div>
+        <div style={{height:2,background:`linear-gradient(90deg,${C.accent},${C.purple})`,borderRadius:1,marginBottom:12}}/>
+        <div style={{display:"flex",justifyContent:"center",gap:24,marginBottom:12}}>
+          <div><div style={{fontSize:9*sc,color:C.dim,textTransform:"uppercase",marginBottom:4}}>Player 1</div><div style={{fontSize:14*sc,fontWeight:700}}>{teamInfo.p1}</div></div>
+          <div><div style={{fontSize:9*sc,color:C.dim,textTransform:"uppercase",marginBottom:4}}>Player 2</div><div style={{fontSize:14*sc,fontWeight:700}}>{teamInfo.p2}</div></div>
+        </div>
+        {bracket&&(()=>{const ms=bracket.matches.filter(m=>m.t1===teamInfo.id||m.t2===teamInfo.id);
+          const w=ms.filter(m=>m.status==="done"&&m.winnerId===teamInfo.id).length;
+          const l=ms.filter(m=>m.status==="done"&&m.loserId===teamInfo.id).length;
+          const active=ms.find(m=>m.status==="active");
+          return <div>
+            <div style={{display:"flex",justifyContent:"center",gap:20,marginBottom:10}}>
+              <div><span style={{fontSize:24*sc,fontWeight:900,color:C.W}}>{w}</span><span style={{fontSize:10*sc,color:C.dim,marginLeft:4}}>wins</span></div>
+              <div><span style={{fontSize:24*sc,fontWeight:900,color:l>0?C.L:C.dim}}>{l}</span><span style={{fontSize:10*sc,color:C.dim,marginLeft:4}}>{l>=2?"eliminated":"loss"+(l===1?"":"es")}</span></div>
+            </div>
+            {active&&<div style={{fontSize:11*sc,color:C.blue,fontWeight:600}}>Currently playing on Lane {active.board}</div>}
+          </div>})()}
+        <button onClick={()=>setTeamInfo(null)} style={{...B("g"),width:"100%",marginTop:12,justifyContent:"center"}}>Close</button>
+      </div>
+    </div>}
 
     {/* PIN MODAL */}
     {pinModal&&<div style={OV} onClick={e=>{if(e.target===e.currentTarget){setPinModal(null);setPinInput("")}}}>
