@@ -2565,8 +2565,10 @@ function App(){
   const[eNm,sENm]=useState("");const[eP1,sEP1]=useState("");const[eP2,sEP2]=useState("");
   const[eTid,sETid]=useState(null);
   const[aP1,sAP1]=useState("");const[aP2,sAP2]=useState("");const[aTN,sATN]=useState("");
-  const[testN,setTestN]=useState(8);const[testB,setTestB]=useState(4);
+  const[testN,setTestN]=useState(8);
   const[undoStack,setUndoStack]=useState([]); // [{team, index, time}]
+  const[testMode,setTestMode]=useState(false);
+  const[simUndoStack,setSimUndoStack]=useState([]); // snapshots of bracket+phase before each sim
 
   const fileRef=useRef(null);const saveRef=useRef(null);const loadedRef=useRef(false);const settledRef=useRef(false);
 
@@ -2728,14 +2730,14 @@ function App(){
 
   const doReset=useCallback(async()=>{settledRef.current=false;await safeSnap(ser(),"Pre-reset");await sd(SK);
     setPhase("reg");setTeams([]);setBoards(4);setBracket(null);setModal(null);setConfirm(null);
-    sfP1("");sfP2("");sfTN("");sfS1("");sfS2("");sETid(null);setSpectator(true);setUndoStack([]);
+    sfP1("");sfP2("");sfTN("");sfS1("");sfS2("");sETid(null);setSpectator(true);setUndoStack([]);setTestMode(false);setSimUndoStack([]);
     await ss(SK,{phase:"reg",teams:[],boards:4,bracket:null,theme,sc,autoB,shareUrl,v:8,savedAt:new Date().toISOString()});
     setTimeout(()=>{settledRef.current=true},600);flash("Reset!","success");
     setTimeout(async()=>{const[a,b]=await Promise.all([sl(SP),sl(MP)]);const all=[...a,...b];for(let i=0;i<all.length;i+=30)await Promise.all(all.slice(i,i+30).map(k=>sd(k)))},100)
   },[flash,ser,theme,sc,autoB]);
 
   const doNew=useCallback(async()=>{settledRef.current=false;await safeSnap(ser(),"Pre-new");
-    setPhase("reg");setBracket(null);setModal(null);setConfirm(null);sfP1("");sfP2("");sfTN("");
+    setPhase("reg");setBracket(null);setModal(null);setConfirm(null);sfP1("");sfP2("");sfTN("");setTestMode(false);setSimUndoStack([]);
     await ss(SK,{phase:"reg",teams,boards,bracket:null,theme,sc,autoB,shareUrl,v:8,savedAt:new Date().toISOString()});
     setTimeout(()=>{settledRef.current=true},600);flash("Back to registration.","success")},[flash,ser,teams,boards,theme,sc,autoB]);
 
@@ -2744,12 +2746,15 @@ function App(){
 
   const genTest=useCallback((start)=>{const t=[],used=new Set();for(let i=0;i<testN;i++){let nm;let g=0;do{nm=`${rnd(TADJ)} ${rnd(TNOUN)}`;g++}while(used.has(nm)&&g<100);if(used.has(nm))nm+=` ${i+1}`;used.add(nm);
     t.push({id:uid(),name:nm,p1:`${rnd(FIRST)} ${rnd(LAST)}`,p2:`${rnd(FIRST)} ${rnd(LAST)}`})}
-    setTeams(t);setBoards(testB);setModal(null);if(start)setTimeout(()=>startTourn(t),50);else flash(`${testN} teams ready`,"success")},[testN,testB,flash,startTourn]);
+    setTeams(t);setModal(null);if(start){setTestMode(true);setSimUndoStack([]);setTimeout(()=>startTourn(t),50)}else flash(`${testN} teams ready`,"success")},[testN,flash,startTourn]);
 
   const simRound=useCallback(()=>{if(!bracket)return;
     // Find the earliest round/bracket combo that has playable matches
     const playable=bracket.matches.filter(m=>(m.status==="ready"||m.status==="active")&&m.t1&&m.t2);
     if(!playable.length){flash("No matches to simulate","error");return}
+    // Save snapshot for undo (deep copy matches)
+    const snap=JSON.parse(JSON.stringify({matches:bracket.matches,p:bracket.p,R:bracket.R,lbR:bracket.lbR,gfId:bracket.gfId,gfrId:bracket.gfrId,phase}));
+    setSimUndoStack(prev=>[...prev,snap]);
     // Sort by bracket order to find the "next column"
     const ord=m=>{if(m.bracket==="GFR")return 10000;if(m.bracket==="GF")return 9000;if(m.bracket==="W")return m.round*100;if(m.round%2===1)return Math.ceil(m.round/2)*100+50;return(m.round/2+1)*100+25};
     playable.sort((a,b)=>ord(a)-ord(b));
@@ -2769,7 +2774,12 @@ function App(){
     if(done){flash(`Simulated ${count} matches. CHAMPION CROWNED!`,"success");
       setShowCeleb(true);setCelebPcs(Array.from({length:40},(_,i)=>({id:i,ci:i%8,left:10+Math.random()*80,top:30+Math.random()*40,delay:Math.random()*0.6})));setTimeout(()=>setShowCeleb(false),5000)}
     else flash(`Simulated ${count} matches`,"success");
-    setBracket({...bracket})},[bracket,autoB,doAA,flash]);
+    setBracket({...bracket})},[bracket,autoB,doAA,flash,phase]);
+
+  const simUndo=useCallback(()=>{if(!simUndoStack.length){flash("Nothing to undo","error");return}
+    const prev=[...simUndoStack];const snap=prev.pop();setSimUndoStack(prev);
+    const restored=rebMM(snap);setBracket(restored);setPhase(snap.phase);
+    flash("Simulation undone","success")},[simUndoStack,flash]);
 
   const openBk=useCallback(()=>{setModal({type:"backups"});allBk().then(setBackups).catch(()=>setBackups([]))},[]);
   const restoreBk=useCallback(async k=>{settledRef.current=false;const d=await sg(k);if(d){deser(d);await ss(SK,{...d,savedAt:new Date().toISOString()});flash("Restored!","success");setModal(null);setTimeout(()=>{settledRef.current=true},600)}},[deser,flash]);
@@ -3126,6 +3136,12 @@ function App(){
             {offlineMode?<><span style={{width:6,height:6,borderRadius:"50%",background:C.L}}/>Online</>:<><span style={{width:6,height:6,borderRadius:"50%",background:C.W}}/>Live</>}
           </button>
         </div>
+        {testMode&&phase!=="reg"&&<div style={{display:"flex",gap:6,marginBottom:14*sc,alignItems:"center",flexWrap:"wrap"}}>
+          <span style={{fontSize:10*sc,fontWeight:800,color:C.purple,textTransform:"uppercase",letterSpacing:"0.08em",padding:`3px ${8*sc}px`,background:C.purpleBg,borderRadius:4,border:`1px solid ${C.purple}44`}}>Test Mode</span>
+          <button onClick={simRound} style={{...B("c"),borderColor:C.purple+"66",color:C.purple,fontWeight:700}}>Simulate Next Round</button>
+          <button onClick={simUndo} disabled={!simUndoStack.length} style={{...B("c"),borderColor:simUndoStack.length?C.purple+"66":C.border,color:simUndoStack.length?C.purple:C.dim,fontWeight:700,opacity:simUndoStack.length?1:0.5,cursor:simUndoStack.length?"pointer":"default"}}>Undo Sim{simUndoStack.length>0&&` (${simUndoStack.length})`}</button>
+          <button onClick={()=>{setTestMode(false);setSimUndoStack([]);flash("Test mode off","success")}} style={{...B("s"),fontSize:10*sc,color:C.dim}}>Exit Test</button>
+        </div>}
         {renderSection("Winners' Bracket",C.W,wR)}
         {lRs.length>0&&renderSection("Losers' Bracket",C.L,lRs)}
         <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8*sc}}><div style={{width:4,height:16*sc,borderRadius:2,background:C.purple}}/>
@@ -3322,13 +3338,10 @@ function App(){
         <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:8,flexWrap:"wrap"}}>
           <span style={{fontSize:12*sc}}>Teams:</span>
           <input type="number" min="2" value={testN} onChange={e=>{const v=parseInt(e.target.value);if(!isNaN(v)&&v>=2)setTestN(v);else if(e.target.value==="")setTestN(2)}} style={{...I,width:64,padding:"4px 8px",fontSize:12*sc,textAlign:"center"}} />
-          <span style={{fontSize:12*sc}}>Lanes:</span>
-          <input type="number" min="1" value={testB} onChange={e=>{const v=parseInt(e.target.value);if(!isNaN(v)&&v>=1)setTestB(v);else if(e.target.value==="")setTestB(1)}} style={{...I,width:64,padding:"4px 8px",fontSize:12*sc,textAlign:"center"}} /></div>
+          <span style={{fontSize:10*sc,color:C.dim}}>(uses lane count from Tournament settings above)</span></div>
         <div style={{display:"flex",gap:6}}>
           <button onClick={()=>{if(phase==="play")ask("Tournament in progress!","This will replace all teams.",()=>genTest(false));else genTest(false)}} style={{...B("c"),flex:1,justifyContent:"center",borderColor:C.purple+"66",color:C.purple}}>Generate Only</button>
           <button onClick={()=>{if(phase==="play")ask("Tournament in progress!","This starts a new tournament.",()=>genTest(true));else genTest(true)}} style={{...B("a"),flex:1,justifyContent:"center",background:C.purple}}>Generate & Start</button></div>
-        {phase==="play"&&bracket&&<div style={{display:"flex",gap:6,marginTop:8}}>
-          <button onClick={simRound} style={{...B("c"),flex:1,justifyContent:"center",borderColor:C.blue+"66",color:C.blue,fontWeight:700}}>Simulate Next Round</button></div>}
       </div>
     </div></div>}
 
