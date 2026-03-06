@@ -2791,6 +2791,17 @@ function App(){
   const readyN=useMemo(()=>bracket?.matches?.filter(m=>m.status==="ready").length||0,[bracket]);
   const champion=useMemo(()=>{if(phase!=="done"||!bracket)return null;const gf=bracket.matches.find(m=>m.id===bracket.gfId),gfr=bracket.matches.find(m=>m.id===bracket.gfrId);
     if(gfr?.status==="done")return tName(gfr.winnerId);if(gf?.status==="done"&&gf.winnerId===gf.t1)return tName(gf.winnerId);return null},[phase,bracket,tName]);
+  const podium=useMemo(()=>{if(phase!=="done"||!bracket)return null;
+    const gf=bracket.matches.find(m=>m.id===bracket.gfId),gfr=bracket.matches.find(m=>m.id===bracket.gfrId);
+    let first=null,second=null,third=null;
+    // 1st and 2nd from GF/GFR
+    if(gfr?.status==="done"){first=gfr.winnerId;second=gfr.loserId}
+    else if(gf?.status==="done"&&gf.winnerId===gf.t1){first=gf.winnerId;second=gf.loserId}
+    // 3rd = loser of last LB round (the LB final feeds t2 into GF)
+    const lbFinal=bracket.matches.filter(m=>m.bracket==="L"&&m.status==="done").sort((a,b)=>b.round-a.round)[0];
+    if(lbFinal)third=lbFinal.loserId;
+    if(!first)return null;
+    return{first:tName(first),second:tName(second),third:tName(third)}},[phase,bracket,tName]);
   const standings=useMemo(()=>{if(!bracket)return[];const st={};teams.forEach(t=>{st[t.id]={...t,w:0,l:0,elim:false,inL:false}});
     bracket.matches.forEach(m=>{if(m.status!=="done"||!m.winnerId)return;if(st[m.winnerId])st[m.winnerId].w++;if(m.loserId&&st[m.loserId]){st[m.loserId].l++;if(st[m.loserId].l>=2)st[m.loserId].elim=true;else st[m.loserId].inL=true}});
     return Object.values(st).sort((a,b)=>{if(a.elim!==b.elim)return a.elim?1:-1;return b.w-a.w||a.l-b.l})},[bracket,teams]);
@@ -2803,6 +2814,103 @@ function App(){
   const qrSvg=useMemo(()=>{if(!shareUrl)return null;const qr=makeQR(shareUrl);if(!qr)return null;
     const{grid:g,size:sz}=qr;const rects=[];g.forEach((row,r)=>row.forEach((v,c)=>{if(v)rects.push({r,c})}));
     return{rects,sz}},[shareUrl]);
+
+  // ── Export Bracket as Image ──
+  const exportBracketImage=useCallback(()=>{
+    if(!bracket)return;
+    // roundRect polyfill for older browsers
+    if(!CanvasRenderingContext2D.prototype.roundRect){CanvasRenderingContext2D.prototype.roundRect=function(x,y,w,h,r){r=Math.min(r,w/2,h/2);this.moveTo(x+r,y);this.arcTo(x+w,y,x+w,y+h,r);this.arcTo(x+w,y+h,x,y+h,r);this.arcTo(x,y+h,x,y,r);this.arcTo(x,y,x+w,y,r);this.closePath()}}
+    const{matches,R,lbR:lR}=bracket;
+    const eMW=220,eMH=68,eGV=10,eCW=40,pad=40,secGap=50;
+    const eLayout=(rounds)=>{const pos={},conns=[];
+      rounds.forEach((ms,ri)=>{const x=ri*(eMW+eCW);
+        if(ri===0)ms.forEach((m,mi)=>{pos[m.id]={x,y:mi*(eMH+eGV)}});
+        else{const prev=rounds[ri-1];
+          if(ms.length===prev.length)ms.forEach((m,mi)=>{const py=pos[prev[mi]?.id];pos[m.id]={x,y:py?py.y:mi*(eMH+eGV)}});
+          else ms.forEach((m,mi)=>{const f1=prev[mi*2],f2=prev[mi*2+1];
+            if(f1&&f2&&pos[f1.id]&&pos[f2.id])pos[m.id]={x,y:(pos[f1.id].y+pos[f2.id].y)/2};
+            else if(f1&&pos[f1.id])pos[m.id]={x,y:pos[f1.id].y};else pos[m.id]={x,y:mi*(eMH+eGV)}});
+          if(ms.length===prev.length)ms.forEach((m,mi)=>{const f=prev[mi];if(!f||!pos[f.id]||!pos[m.id])return;conns.push({x1:pos[f.id].x+eMW,y1:pos[f.id].y+eMH/2,x2:pos[m.id].x,y2:pos[m.id].y+eMH/2})});
+          else ms.forEach((m,mi)=>{const f1=prev[mi*2],f2=prev[mi*2+1];if(!f1||!pos[f1.id]||!pos[m.id])return;
+            const mx=pos[f1.id].x+eMW+eCW/2,y1c=pos[f1.id].y+eMH/2,y2c=f2&&pos[f2.id]?pos[f2.id].y+eMH/2:y1c,ytc=pos[m.id].y+eMH/2;
+            conns.push({x1:pos[f1.id].x+eMW,y1:y1c,x2:mx,y2:y1c},{x1:mx,y1:y1c,x2:mx,y2:ytc},{x1:mx,y1:ytc,x2:pos[m.id].x,y2:ytc});
+            if(f2&&pos[f2.id])conns.push({x1:pos[f2.id].x+eMW,y1:y2c,x2:mx,y2:y2c})})}});
+      let tW=0,tH=0;Object.values(pos).forEach(p=>{tW=Math.max(tW,p.x+eMW);tH=Math.max(tH,p.y+eMH)});
+      return{pos,conns,tW,tH}};
+    // Build rounds
+    const wR=[];for(let r=1;r<=R;r++)wR.push(matches.filter(m=>m.bracket==="W"&&m.round===r));
+    const lRs=[];for(let r=1;r<=lR;r++)lRs.push(matches.filter(m=>m.bracket==="L"&&m.round===r));
+    const gf=matches.find(m=>m.bracket==="GF"),gfr=matches.find(m=>m.bracket==="GFR");
+    const wL=eLayout(wR),lL=lRs.length?eLayout(lRs):null;
+    // Calculate total canvas size
+    const titleH=60,podiumH=podium?140:0;
+    let totalW=Math.max(wL.tW,lL?lL.tW:0)+pad*2;
+    let totalH=titleH+wL.tH+secGap+(lL?lL.tH+secGap:0)+eMH*2+secGap+podiumH+pad*2;
+    if(gfr&&(gfr.status!=="pending"||gf?.status==="done"))totalH+=eMH+20;
+    totalW=Math.max(totalW,500);
+    // Create canvas
+    const cvs=document.createElement("canvas");const dpr=2;
+    cvs.width=totalW*dpr;cvs.height=totalH*dpr;
+    const ctx=cvs.getContext("2d");ctx.scale(dpr,dpr);
+    // Background
+    ctx.fillStyle="#080B10";ctx.fillRect(0,0,totalW,totalH);
+    // Title
+    ctx.fillStyle="#00D4AA";ctx.font="bold 22px 'Segoe UI',system-ui,sans-serif";ctx.textAlign="center";
+    ctx.fillText("CRANBERRY CUP CORNHOLE TOURNAMENT",totalW/2,pad+28);
+    ctx.fillStyle="#555";ctx.font="11px 'Segoe UI',system-ui,sans-serif";
+    ctx.fillText(new Date().toLocaleDateString("en-US",{year:"numeric",month:"long",day:"numeric"}),totalW/2,pad+46);
+    ctx.textAlign="left";
+    // Draw helpers
+    const drawMatch=(m,x,y)=>{
+      const bc=m.bracket==="W"?"#00D4AA":m.bracket==="L"?"#F5634A":"#A855F7";
+      const done=m.status==="done";
+      ctx.fillStyle="#111822";ctx.beginPath();ctx.roundRect(x,y,eMW,eMH,6);ctx.fill();
+      ctx.fillStyle=bc;ctx.fillRect(x,y+4,3,eMH-8);
+      ctx.font="bold 8px 'Segoe UI',system-ui,sans-serif";ctx.fillStyle=bc;
+      const label=m.bracket==="GF"?"GRAND FINAL":m.bracket==="GFR"?"GF RESET":`${m.bracket}R${m.round}`;
+      ctx.fillText(label,x+10,y+13);
+      if(done&&m.winnerId){ctx.fillStyle="#555";ctx.font="7px 'Segoe UI',system-ui,sans-serif";ctx.fillText("FINAL",x+10+ctx.measureText(label).width+8,y+13)}
+      // Team rows
+      const drawTeam=(tid,score,yOff)=>{
+        const name=tName(tid);const isW=done&&m.winnerId===tid;
+        if(isW){ctx.fillStyle=bc+"22";ctx.beginPath();ctx.roundRect(x+6,y+yOff-2,eMW-12,22,3);ctx.fill();
+          ctx.fillStyle=bc;ctx.fillRect(x+6,y+yOff+2,2,14)}
+        ctx.font=isW?"bold 12px 'Segoe UI',system-ui,sans-serif":"12px 'Segoe UI',system-ui,sans-serif";
+        ctx.fillStyle=!tid?"#333":isW?"#E8E8E8":"#AAA";
+        const tn=name.length>20?name.slice(0,18)+"..":name;
+        ctx.fillText(tn+(isW?" \u2713":""),x+12,y+yOff+13);
+        if(score!=null){ctx.font="bold 13px 'Segoe UI',system-ui,sans-serif";ctx.fillStyle=isW?bc:"#AAA";ctx.textAlign="right";ctx.fillText(String(score),x+eMW-10,y+yOff+14);ctx.textAlign="left"}};
+      drawTeam(m.t1,m.s1,20);drawTeam(m.t2,m.s2,44)};
+    const drawConns=(conns,offX,offY)=>{ctx.strokeStyle="#333";ctx.lineWidth=1.2;
+      conns.forEach(c=>{ctx.beginPath();ctx.moveTo(c.x1+offX,c.y1+offY);ctx.lineTo(c.x2+offX,c.y2+offY);ctx.stroke()})};
+    const drawSection=(label,color,layout,offY)=>{
+      ctx.fillStyle=color;ctx.font="bold 12px 'Segoe UI',system-ui,sans-serif";
+      ctx.fillText(label.toUpperCase(),pad,offY-6);
+      drawConns(layout.conns,pad,offY);
+      Object.entries(layout.pos).forEach(([id,p])=>{const m=matches.find(x=>x.id===id);if(m)drawMatch(m,p.x+pad,p.y+offY)})};
+    // Draw sections
+    let curY=titleH+pad;
+    drawSection("Winners' Bracket","#00D4AA",wL,curY);curY+=wL.tH+secGap;
+    if(lL){drawSection("Losers' Bracket","#F5634A",lL,curY);curY+=lL.tH+secGap}
+    // Grand Final
+    ctx.fillStyle="#A855F7";ctx.font="bold 12px 'Segoe UI',system-ui,sans-serif";ctx.fillText("GRAND FINAL",pad,curY-6);
+    if(gf)drawMatch(gf,pad,curY);
+    if(gfr&&(gfr.status!=="pending"||gf?.status==="done"))drawMatch(gfr,pad+eMW+60,curY);
+    curY+=eMH+secGap;
+    // Podium
+    if(podium){
+      const cx=totalW/2;
+      ctx.fillStyle="#A855F7";ctx.font="bold 14px 'Segoe UI',system-ui,sans-serif";ctx.textAlign="center";
+      ctx.fillText("\ud83c\udfc6 TOURNAMENT RESULTS \ud83c\udfc6",cx,curY);
+      ctx.font="bold 20px 'Segoe UI',system-ui,sans-serif";ctx.fillStyle="#FFD700";ctx.fillText("1st: "+podium.first,cx,curY+30);
+      ctx.font="bold 16px 'Segoe UI',system-ui,sans-serif";ctx.fillStyle="#C0C0C0";ctx.fillText("2nd: "+(podium.second||"TBD"),cx,curY+56);
+      ctx.fillStyle="#CD7F32";ctx.fillText("3rd: "+(podium.third||"TBD"),cx,curY+80);
+      ctx.textAlign="left"}
+    // Download
+    const link=document.createElement("a");link.download=`cranberry-cup-bracket-${new Date().toISOString().slice(0,10)}.png`;
+    link.href=cvs.toDataURL("image/png");link.click();
+    flash("Bracket image downloaded!","success");
+  },[bracket,tName,podium,flash]);
 
   // ── Layout ──
   const mW=~~(220*sc),mH=~~(68*sc),gV=~~(10*sc),cW=~~(40*sc);
@@ -3118,9 +3226,37 @@ function App(){
           <div style={{flex:1}}/>
           <button onClick={()=>{setTestMode(false);setSimUndoStack([]);flash("Test mode off","success")}} style={{...B("s"),fontSize:10*sc,color:C.dim}}>Exit Test</button>
         </div>}
-        {champion&&<div style={{textAlign:"center",padding:`${24*sc}px`,marginBottom:20*sc,background:`linear-gradient(135deg,${C.purpleBg},${C.WBg})`,borderRadius:14,border:`2px solid ${C.purple}`,boxShadow:`0 4px 30px ${C.purpleBg}`,...(showCeleb?{animation:"popIn 0.6s cubic-bezier(0.34,1.56,0.64,1)"}:{})}}>
-          <div style={{fontSize:11*sc,color:C.purple,fontWeight:800,textTransform:"uppercase",letterSpacing:"0.15em",marginBottom:4}}>{"\ud83c\udfc6"} Tournament Champion {"\ud83c\udfc6"}</div>
-          <div style={{fontSize:30*sc,fontWeight:900}}>{champion}</div></div>}
+        {podium&&<div style={{textAlign:"center",padding:`${24*sc}px`,marginBottom:20*sc,background:`linear-gradient(135deg,${C.purpleBg},${C.WBg})`,borderRadius:14,border:`2px solid ${C.purple}`,boxShadow:`0 4px 30px ${C.purpleBg}`,...(showCeleb?{animation:"popIn 0.6s cubic-bezier(0.34,1.56,0.64,1)"}:{})}}>
+          <div style={{fontSize:11*sc,color:C.purple,fontWeight:800,textTransform:"uppercase",letterSpacing:"0.15em",marginBottom:16}}>{"\ud83c\udfc6"} Tournament Results {"\ud83c\udfc6"}</div>
+          <div style={{display:"flex",alignItems:"flex-end",justifyContent:"center",gap:12*sc,marginBottom:8}}>
+            {/* 2nd place */}
+            <div style={{textAlign:"center",flex:"0 0 auto",minWidth:80*sc}}>
+              <div style={{fontSize:28*sc,marginBottom:4}}>🥈</div>
+              <div style={{fontSize:10*sc,fontWeight:800,color:C.dim,textTransform:"uppercase",letterSpacing:"0.1em",marginBottom:2}}>2nd Place</div>
+              <div style={{fontSize:16*sc,fontWeight:800,color:C.text}}>{podium.second||"TBD"}</div>
+              <div style={{height:60*sc,background:`linear-gradient(to top, ${C.border}, ${C.card})`,borderRadius:"6px 6px 0 0",marginTop:8,display:"flex",alignItems:"center",justifyContent:"center"}}>
+                <span style={{fontSize:24*sc,fontWeight:900,color:C.dim}}>2</span></div>
+            </div>
+            {/* 1st place */}
+            <div style={{textAlign:"center",flex:"0 0 auto",minWidth:100*sc}}>
+              <div style={{fontSize:36*sc,marginBottom:4}}>🥇</div>
+              <div style={{fontSize:10*sc,fontWeight:800,color:C.purple,textTransform:"uppercase",letterSpacing:"0.1em",marginBottom:2}}>Champion</div>
+              <div style={{fontSize:22*sc,fontWeight:900,color:C.text}}>{podium.first}</div>
+              <div style={{height:90*sc,background:`linear-gradient(to top, ${C.purple}44, ${C.purpleBg})`,borderRadius:"6px 6px 0 0",marginTop:8,border:`1px solid ${C.purple}44`,borderBottom:"none",display:"flex",alignItems:"center",justifyContent:"center"}}>
+                <span style={{fontSize:30*sc,fontWeight:900,color:C.purple}}>1</span></div>
+            </div>
+            {/* 3rd place */}
+            <div style={{textAlign:"center",flex:"0 0 auto",minWidth:80*sc}}>
+              <div style={{fontSize:28*sc,marginBottom:4}}>🥉</div>
+              <div style={{fontSize:10*sc,fontWeight:800,color:C.dim,textTransform:"uppercase",letterSpacing:"0.1em",marginBottom:2}}>3rd Place</div>
+              <div style={{fontSize:16*sc,fontWeight:800,color:C.text}}>{podium.third||"TBD"}</div>
+              <div style={{height:44*sc,background:`linear-gradient(to top, ${C.border}, ${C.card})`,borderRadius:"6px 6px 0 0",marginTop:8,display:"flex",alignItems:"center",justifyContent:"center"}}>
+                <span style={{fontSize:24*sc,fontWeight:900,color:C.dim}}>3</span></div>
+            </div>
+          </div>
+          <button onClick={()=>{exportBracketImage()}} style={{marginTop:16,padding:`${10*sc}px ${24*sc}px`,borderRadius:8,border:`1px solid ${C.purple}66`,background:C.card,color:C.purple,fontWeight:700,fontSize:13*sc,cursor:"pointer",display:"inline-flex",alignItems:"center",gap:8}}>
+            {"\ud83d\uddbc\ufe0f"} Download Full Bracket Image</button>
+        </div>}
         {progress&&phase!=="done"&&<div style={{marginBottom:14*sc}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:4}}>
             <span style={{fontSize:10*sc,fontWeight:700,color:C.dim,textTransform:"uppercase"}}>Tournament Progress</span>
@@ -3148,7 +3284,11 @@ function App(){
         <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8*sc}}><div style={{width:4,height:16*sc,borderRadius:2,background:C.purple}}/>
           <span style={{fontSize:13*sc,fontWeight:800,textTransform:"uppercase",letterSpacing:"0.08em",color:C.purple}}>Grand Final</span></div>
         <div style={{display:"flex",gap:16*sc,flexWrap:"wrap"}}>{gf&&renderMatch(gf,true)}{gfr&&(gfr.status!=="pending"||gf?.status==="done")&&renderMatch(gfr,true)}</div>
-        <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:8,marginTop:32*sc,opacity:0.2}}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:12,marginTop:32*sc}}>
+          <button onClick={exportBracketImage} style={{padding:`${8*sc}px ${18*sc}px`,borderRadius:8,border:`1px solid ${C.border}`,background:C.card,color:C.dim,fontWeight:600,fontSize:11*sc,cursor:"pointer",display:"inline-flex",alignItems:"center",gap:6,opacity:0.7}}>
+            {"\ud83d\uddbc\ufe0f"} Download Bracket Image</button>
+        </div>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:8,marginTop:12*sc,opacity:0.2}}>
           <span style={{fontSize:9*sc,fontWeight:700,color:C.brand,letterSpacing:"0.1em",textTransform:"uppercase"}}>Cranberry CUP {"\u2022"} Community Uniting People</span></div>
       </div>})()}
 
