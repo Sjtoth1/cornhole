@@ -2746,6 +2746,31 @@ function App(){
     t.push({id:uid(),name:nm,p1:`${rnd(FIRST)} ${rnd(LAST)}`,p2:`${rnd(FIRST)} ${rnd(LAST)}`})}
     setTeams(t);setBoards(testB);setModal(null);if(start)setTimeout(()=>startTourn(t),50);else flash(`${testN} teams ready`,"success")},[testN,testB,flash,startTourn]);
 
+  const simRound=useCallback(()=>{if(!bracket)return;
+    // Find the earliest round/bracket combo that has playable matches
+    const playable=bracket.matches.filter(m=>(m.status==="ready"||m.status==="active")&&m.t1&&m.t2);
+    if(!playable.length){flash("No matches to simulate","error");return}
+    // Sort by bracket order to find the "next column"
+    const ord=m=>{if(m.bracket==="GFR")return 10000;if(m.bracket==="GF")return 9000;if(m.bracket==="W")return m.round*100;if(m.round%2===1)return Math.ceil(m.round/2)*100+50;return(m.round/2+1)*100+25};
+    playable.sort((a,b)=>ord(a)-ord(b));
+    const firstOrd=ord(playable[0]);
+    const batch=playable.filter(m=>ord(m)===firstOrd);
+    let count=0;
+    for(const m of batch){
+      // Generate realistic cornhole scores: winner 21, loser 0-20
+      const loser=Math.floor(Math.random()*21);
+      const flip=Math.random()<0.5;
+      m.s1=flip?21:loser;m.s2=flip?loser:21;
+      m.winnerId=m.s1>m.s2?m.t1:m.t2;m.loserId=m.s1>m.s2?m.t2:m.t1;m.status="done";m.board=null;count++}
+    const mm2={};bracket.matches.forEach(x=>{if(x.bracket==="W"||x.bracket==="L")mm2[`${x.bracket}-${x.round}-${x.index}`]=x});
+    prop(bracket.matches,mm2,bracket.p,bracket.R,bracket.lbR,bracket.gfId,bracket.gfrId);bracket.mm=mm2;if(autoB)doAA(bracket);
+    const gf=bracket.matches.find(x=>x.id===bracket.gfId),gfr=bracket.matches.find(x=>x.id===bracket.gfrId);
+    let done=false;if(gf?.status==="done"){if(gf.winnerId===gf.t1){setPhase("done");done=true}else if(gfr?.status==="done"){setPhase("done");done=true}}
+    if(done){flash(`Simulated ${count} matches. CHAMPION CROWNED!`,"success");
+      setShowCeleb(true);setCelebPcs(Array.from({length:40},(_,i)=>({id:i,ci:i%8,left:10+Math.random()*80,top:30+Math.random()*40,delay:Math.random()*0.6})));setTimeout(()=>setShowCeleb(false),5000)}
+    else flash(`Simulated ${count} matches`,"success");
+    setBracket({...bracket})},[bracket,autoB,doAA,flash]);
+
   const openBk=useCallback(()=>{setModal({type:"backups"});allBk().then(setBackups).catch(()=>setBackups([]))},[]);
   const restoreBk=useCallback(async k=>{settledRef.current=false;const d=await sg(k);if(d){deser(d);await ss(SK,{...d,savedAt:new Date().toISOString()});flash("Restored!","success");setModal(null);setTimeout(()=>{settledRef.current=true},600)}},[deser,flash]);
   const fileSave=useCallback(()=>{const bl=new Blob([JSON.stringify(ser(),null,2)],{type:"application/json"});const a=document.createElement("a");a.href=URL.createObjectURL(bl);a.download=`cornhole-${new Date().toISOString().slice(0,16).replace(/:/g,"")}.json`;a.click();flash("Downloaded!","success")},[ser,flash]);
@@ -3296,14 +3321,14 @@ function App(){
       <div style={{background:C.purpleBg,borderRadius:8,padding:12,border:`1px solid ${C.purple}44`}}>
         <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:8,flexWrap:"wrap"}}>
           <span style={{fontSize:12*sc}}>Teams:</span>
-          <select value={testN} onChange={e=>setTestN(parseInt(e.target.value))} style={{...I,width:"auto",padding:"4px 8px",fontSize:12*sc}}>
-            {[3,4,5,6,7,8,10,12,16,20,24,32].map(n=><option key={n} value={n}>{n}</option>)}</select>
+          <input type="number" min="2" value={testN} onChange={e=>{const v=parseInt(e.target.value);if(!isNaN(v)&&v>=2)setTestN(v);else if(e.target.value==="")setTestN(2)}} style={{...I,width:64,padding:"4px 8px",fontSize:12*sc,textAlign:"center"}} />
           <span style={{fontSize:12*sc}}>Lanes:</span>
-          <select value={testB} onChange={e=>setTestB(parseInt(e.target.value))} style={{...I,width:"auto",padding:"4px 8px",fontSize:12*sc}}>
-            {[1,2,3,4,5,6,8,10,12,15].map(n=><option key={n} value={n}>{n}</option>)}</select></div>
+          <input type="number" min="1" value={testB} onChange={e=>{const v=parseInt(e.target.value);if(!isNaN(v)&&v>=1)setTestB(v);else if(e.target.value==="")setTestB(1)}} style={{...I,width:64,padding:"4px 8px",fontSize:12*sc,textAlign:"center"}} /></div>
         <div style={{display:"flex",gap:6}}>
           <button onClick={()=>{if(phase==="play")ask("Tournament in progress!","This will replace all teams.",()=>genTest(false));else genTest(false)}} style={{...B("c"),flex:1,justifyContent:"center",borderColor:C.purple+"66",color:C.purple}}>Generate Only</button>
           <button onClick={()=>{if(phase==="play")ask("Tournament in progress!","This starts a new tournament.",()=>genTest(true));else genTest(true)}} style={{...B("a"),flex:1,justifyContent:"center",background:C.purple}}>Generate & Start</button></div>
+        {phase==="play"&&bracket&&<div style={{display:"flex",gap:6,marginTop:8}}>
+          <button onClick={simRound} style={{...B("c"),flex:1,justifyContent:"center",borderColor:C.blue+"66",color:C.blue,fontWeight:700}}>Simulate Next Round</button></div>}
       </div>
     </div></div>}
 
