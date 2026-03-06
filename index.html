@@ -3111,6 +3111,13 @@ function App(){
       const lRs=[];for(let r=1;r<=lR;r++)lRs.push(matches.filter(m=>m.bracket==="L"&&m.round===r));
       const gf=matches.find(m=>m.bracket==="GF"),gfr=matches.find(m=>m.bracket==="GFR");
       return <div style={{padding:16*sc,overflowX:"auto"}}>
+        {testMode&&<div style={{display:"flex",gap:6,marginBottom:14*sc,alignItems:"center",flexWrap:"wrap",padding:`8px ${12*sc}px`,background:C.purpleBg,borderRadius:8,border:`1px solid ${C.purple}44`}}>
+          <span style={{fontSize:10*sc,fontWeight:800,color:C.purple,textTransform:"uppercase",letterSpacing:"0.08em",padding:`3px ${8*sc}px`,background:C.card,borderRadius:4,border:`1px solid ${C.purple}44`}}>Test Mode</span>
+          <button onClick={simRound} style={{...B("c"),borderColor:C.purple+"66",color:C.purple,fontWeight:700}}>Simulate Next Round</button>
+          <button onClick={simUndo} disabled={!simUndoStack.length} style={{...B("c"),borderColor:simUndoStack.length?C.purple+"66":C.border,color:simUndoStack.length?C.purple:C.dim,fontWeight:700,opacity:simUndoStack.length?1:0.5,cursor:simUndoStack.length?"pointer":"default"}}>Undo Sim{simUndoStack.length>0?` (${simUndoStack.length})`:""}</button>
+          <div style={{flex:1}}/>
+          <button onClick={()=>{setTestMode(false);setSimUndoStack([]);flash("Test mode off","success")}} style={{...B("s"),fontSize:10*sc,color:C.dim}}>Exit Test</button>
+        </div>}
         {champion&&<div style={{textAlign:"center",padding:`${24*sc}px`,marginBottom:20*sc,background:`linear-gradient(135deg,${C.purpleBg},${C.WBg})`,borderRadius:14,border:`2px solid ${C.purple}`,boxShadow:`0 4px 30px ${C.purpleBg}`,...(showCeleb?{animation:"popIn 0.6s cubic-bezier(0.34,1.56,0.64,1)"}:{})}}>
           <div style={{fontSize:11*sc,color:C.purple,fontWeight:800,textTransform:"uppercase",letterSpacing:"0.15em",marginBottom:4}}>{"\ud83c\udfc6"} Tournament Champion {"\ud83c\udfc6"}</div>
           <div style={{fontSize:30*sc,fontWeight:900}}>{champion}</div></div>}
@@ -3136,12 +3143,6 @@ function App(){
             {offlineMode?<><span style={{width:6,height:6,borderRadius:"50%",background:C.L}}/>Online</>:<><span style={{width:6,height:6,borderRadius:"50%",background:C.W}}/>Live</>}
           </button>
         </div>
-        {testMode&&phase!=="reg"&&<div style={{display:"flex",gap:6,marginBottom:14*sc,alignItems:"center",flexWrap:"wrap"}}>
-          <span style={{fontSize:10*sc,fontWeight:800,color:C.purple,textTransform:"uppercase",letterSpacing:"0.08em",padding:`3px ${8*sc}px`,background:C.purpleBg,borderRadius:4,border:`1px solid ${C.purple}44`}}>Test Mode</span>
-          <button onClick={simRound} style={{...B("c"),borderColor:C.purple+"66",color:C.purple,fontWeight:700}}>Simulate Next Round</button>
-          <button onClick={simUndo} disabled={!simUndoStack.length} style={{...B("c"),borderColor:simUndoStack.length?C.purple+"66":C.border,color:simUndoStack.length?C.purple:C.dim,fontWeight:700,opacity:simUndoStack.length?1:0.5,cursor:simUndoStack.length?"pointer":"default"}}>Undo Sim{simUndoStack.length>0&&` (${simUndoStack.length})`}</button>
-          <button onClick={()=>{setTestMode(false);setSimUndoStack([]);flash("Test mode off","success")}} style={{...B("s"),fontSize:10*sc,color:C.dim}}>Exit Test</button>
-        </div>}
         {renderSection("Winners' Bracket",C.W,wR)}
         {lRs.length>0&&renderSection("Losers' Bracket",C.L,lRs)}
         <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8*sc}}><div style={{width:4,height:16*sc,borderRadius:2,background:C.purple}}/>
