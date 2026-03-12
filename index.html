@@ -62,28 +62,43 @@ const np2 = n => { let p = 1; while (p < n) p *= 2; return p; };
 const uid = () => Math.random().toString(36).slice(2, 10);
 const FIRST=["Mike","Sarah","Jake","Emma","Tom","Lisa","Dave","Amy","Chris","Kim","Joe","Beth","Dan","Kate","Rob","Jess","Matt","Anna","Ben","Lori","Sam","Mia","Pete","Zoe","Nick","Tina","Chad","Ivy","Luke","Fern","Ryan","Dawn","Cole","Ruby","Seth","Jade","Troy","Luna","Finn","Hope"];
 const LAST=["Smith","Jones","Brown","Davis","Clark","Lewis","Hall","King","Green","Baker","Adams","Cruz","Stone","Reed","Ross","Fox","Cole","Nash","Hart","Ray"];
+const MONTHS=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+const fmtDate=(d,time=true)=>{const dt=new Date(d);const dd=String(dt.getDate()).padStart(2,"0");const mm=MONTHS[dt.getMonth()];const yy=dt.getFullYear();if(!time)return`${dd}${mm}${yy}`;const hh=String(dt.getHours()).padStart(2,"0");const mi=String(dt.getMinutes()).padStart(2,"0");return`${dd}${mm}${yy} ${hh}:${mi}`};
 const TADJ=["Blazing","Mighty","Steel","Thunder","Iron","Cosmic","Wild","Rapid","Neon","Shadow","Golden","Crimson","Frost","Storm","Turbo","Epic","Phantom","Noble","Swift","Brave"];
 const TNOUN=["Tossers","Ringers","Slingers","Baggers","Aces","Chuckers","Legends","Squad","Crew","Force","Wolves","Hawks","Bears","Vipers","Dragons","Titans","Rebels","Knights","Pros","Mavs"];
 const rnd = a => a[~~(Math.random()*a.length)];
 
 // ── Storage ──
 const SK="ch8",SP="ch8s:",MP="ch8m:",SF="ch8f:";
-const ss=async(k,v)=>{try{await window.storage.set(k,JSON.stringify(v))}catch{}};
-const sg=async k=>{try{const r=await window.storage.get(k);return r?JSON.parse(r.value):null}catch{return null}};
-const sd=async k=>{try{await window.storage.delete(k)}catch{}};
-const sl=async p=>{try{const r=await window.storage.list(p);return r?.keys||[]}catch{return[]}};
+const ss=async(k,v,sh)=>{try{await window.storage.set(k,JSON.stringify(v),sh)}catch{}};
+const sg=async(k,sh)=>{try{const r=await window.storage.get(k,sh);return r?JSON.parse(r.value):null}catch{return null}};
+const sd=async(k,sh)=>{try{await window.storage.delete(k,sh)}catch{}};
+const sl=async(p,sh)=>{try{const r=await window.storage.list(p,sh);return r?.keys||[]}catch{return[]}};
+const MAX_SNAP=200,MAX_MILE=30,MAX_SAFE=20;
 
-async function doSnap(st,label,mile=false){
-  const p=mile?MP:SP;
-  await ss(`${p}${Date.now()}`,{...st,snapLabel:label,snapTime:new Date().toISOString()});
-  if(!mile){const ks=await sl(SP);if(ks.length>200){const s=[...ks].sort();for(const k of s.slice(0,ks.length-200))await sd(k)}}
+async function trimKeys(prefix,max,shared){
+  const ks=await sl(prefix,shared);
+  if(ks.length>max){const s=[...ks].sort();for(const k of s.slice(0,ks.length-max))await sd(k,shared)}
 }
-async function safeSnap(st,label){await ss(`${SF}${Date.now()}`,{...st,snapLabel:`[SAFETY] ${label}`,snapTime:new Date().toISOString()})}
+async function doSnap(st,label,mile=false){
+  const p=mile?MP:SP;const sh=mile?true:false;
+  await ss(`${p}${Date.now()}`,{...st,snapLabel:label,snapTime:new Date().toISOString()},sh);
+  if(mile){await trimKeys(MP,MAX_MILE,true);await trimKeys(MP,MAX_MILE,false)}
+  else{await trimKeys(SP,MAX_SNAP,false)}
+}
+async function safeSnap(st,label){
+  await ss(`${SF}${Date.now()}`,{...st,snapLabel:`[SAFETY] ${label}`,snapTime:new Date().toISOString()},true);
+  await trimKeys(SF,MAX_SAFE,true);await trimKeys(SF,MAX_SAFE,false);
+}
 async function allBk(){
-  const[a,b,c]=await Promise.all([sl(SP),sl(MP),sl(SF)]);const r=[];
-  for(const k of c){const d=await sg(k);if(d)r.push({key:k,...d,kind:"safety"})}
-  for(const k of b){const d=await sg(k);if(d)r.push({key:k,...d,kind:"milestone"})}
-  for(const k of a){const d=await sg(k);if(d)r.push({key:k,...d,kind:"snap"})}
+  const[a,b,bS,c,cS]=await Promise.all([sl(SP),sl(MP),sl(MP,true),sl(SF),sl(SF,true)]);
+  const r=[],seen=new Set();
+  const add=async(keys,kind,shared)=>{for(const k of keys){
+    const ts=k.replace(/[^0-9]/g,"");if(seen.has(kind+ts))continue;seen.add(kind+ts);
+    const d=await sg(k,shared);if(d)r.push({key:k,shared:!!shared,...d,kind})}};
+  await add(c,"safety",false);await add(cS,"safety",true);
+  await add(b,"milestone",false);await add(bS,"milestone",true);
+  await add(a,"snap",false);
   return r.sort((a,b)=>(b.snapTime||"").localeCompare(a.snapTime||""));
 }
 
@@ -2530,6 +2545,8 @@ function App(){
   const[masterInfo,setMasterInfo]=useState(null);
   const[isOnline,setIsOnline]=useState(typeof navigator!=="undefined"?navigator.onLine:true);
   const[offlineMode,setOfflineMode]=useState(false);
+  const[ghToken,setGhToken]=useState(()=>{try{return localStorage.getItem("gh_pat")||""}catch{return ""}});
+  const[ghDeploying,setGhDeploying]=useState(false);
 
   // PIN hash function
   const _pH=p=>{let h=0;for(let i=0;i<p.length;i++)h=((h<<5)-h+p.charCodeAt(i))|0;return h};
@@ -2782,9 +2799,27 @@ function App(){
     flash("Simulation undone","success")},[simUndoStack,flash]);
 
   const openBk=useCallback(()=>{setModal({type:"backups"});allBk().then(setBackups).catch(()=>setBackups([]))},[]);
-  const restoreBk=useCallback(async k=>{settledRef.current=false;const d=await sg(k);if(d){deser(d);await ss(SK,{...d,savedAt:new Date().toISOString()});flash("Restored!","success");setModal(null);setTimeout(()=>{settledRef.current=true},600)}},[deser,flash]);
-  const fileSave=useCallback(()=>{const bl=new Blob([JSON.stringify(ser(),null,2)],{type:"application/json"});const a=document.createElement("a");a.href=URL.createObjectURL(bl);a.download=`cornhole-${new Date().toISOString().slice(0,16).replace(/:/g,"")}.json`;a.click();flash("Downloaded!","success")},[ser,flash]);
+  const restoreBk=useCallback(async(k,sh)=>{settledRef.current=false;const d=await sg(k,sh);if(d){deser(d);await ss(SK,{...d,savedAt:new Date().toISOString()});flash("Restored!","success");setModal(null);setTimeout(()=>{settledRef.current=true},600)}else{flash("Backup data not found","error")}},[deser,flash]);
+  const fileSave=useCallback(()=>{const bl=new Blob([JSON.stringify(ser(),null,2)],{type:"application/json"});const a=document.createElement("a");a.href=URL.createObjectURL(bl);a.download=`cornhole-${fmtDate(new Date(),false)}.json`;a.click();flash("Downloaded!","success")},[ser,flash]);
   const fileLoad=useCallback(e=>{const f=e.target.files?.[0];if(!f)return;const r=new FileReader();r.onload=async ev=>{try{settledRef.current=false;const s=JSON.parse(ev.target.result);deser(s);await ss(SK,{...s,savedAt:new Date().toISOString()});flash("Restored!","success");setModal(null);setTimeout(()=>{settledRef.current=true},600)}catch{flash("Bad file","error")}};r.readAsText(f);e.target.value=""},[deser,flash]);
+  const ghDeploy=useCallback(async(file)=>{
+    if(!ghToken.trim()){flash("Set a GitHub token first","error");return}
+    setGhDeploying(true);
+    try{
+      let html;
+      if(file){html=await file.text()}
+      else{const r=await fetch(location.href);html=await r.text()}
+      const b64=btoa(unescape(encodeURIComponent(html)));
+      const api="https://api.github.com/repos/Sjtoth1/cornhole/contents/index.html";
+      const cur=await fetch(api,{headers:{"Authorization":`token ${ghToken.trim()}`,"Accept":"application/vnd.github.v3+json"}});
+      if(!cur.ok){flash(`GitHub error: ${cur.status}`,"error");setGhDeploying(false);return}
+      const sha=(await cur.json()).sha;
+      const put=await fetch(api,{method:"PUT",headers:{"Authorization":`token ${ghToken.trim()}`,"Content-Type":"application/json","Accept":"application/vnd.github.v3+json"},
+        body:JSON.stringify({message:`Deploy ${fmtDate(new Date())}`,content:b64,sha})});
+      if(put.ok){flash("Deployed to GitHub!","success")}else{const e=await put.json();flash(`Deploy failed: ${e.message||put.status}`,"error")}
+    }catch(e){flash(`Deploy error: ${e.message}`,"error")}
+    setGhDeploying(false);
+  },[ghToken,flash]);
 
   // ── Computed ──
   const activeN=useMemo(()=>bracket?.matches?.filter(m=>m.status==="active").length||0,[bracket]);
@@ -2858,7 +2893,7 @@ function App(){
     ctx.fillStyle="#00D4AA";ctx.font="bold 22px 'Segoe UI',system-ui,sans-serif";ctx.textAlign="center";
     ctx.fillText("CRANBERRY CUP CORNHOLE TOURNAMENT",totalW/2,pad+28);
     ctx.fillStyle="#555";ctx.font="11px 'Segoe UI',system-ui,sans-serif";
-    ctx.fillText(new Date().toLocaleDateString("en-US",{year:"numeric",month:"long",day:"numeric"}),totalW/2,pad+46);
+    ctx.fillText(fmtDate(new Date(),false),totalW/2,pad+46);
     ctx.textAlign="left";
     // Draw helpers
     const drawMatch=(m,x,y)=>{
@@ -2907,7 +2942,7 @@ function App(){
       ctx.fillStyle="#CD7F32";ctx.fillText("3rd: "+(podium.third||"TBD"),cx,curY+80);
       ctx.textAlign="left"}
     // Download
-    const link=document.createElement("a");link.download=`cranberry-cup-bracket-${new Date().toISOString().slice(0,10)}.png`;
+    const link=document.createElement("a");link.download=`cranberry-cup-bracket-${fmtDate(new Date(),false)}.png`;
     link.href=cvs.toDataURL("image/png");link.click();
     flash("Bracket image downloaded!","success");
   },[bracket,tName,podium,flash]);
@@ -2986,6 +3021,7 @@ function App(){
   // ── RENDER ──
   return <div style={{minHeight:"100vh",background:C.bg,color:C.text,fontFamily:"'Segoe UI',system-ui,sans-serif",transition:"background 0.3s"}}>
     <style>{`@keyframes pulse{0%,100%{opacity:1}50%{opacity:.2}}
+      @keyframes liveShimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
       @keyframes newBoard{0%{box-shadow:0 0 0 0 rgba(0,212,170,0.7)}40%{box-shadow:0 0 30px 8px rgba(0,212,170,0.4)}100%{box-shadow:0 0 0 0 rgba(0,212,170,0)}}
       @keyframes cf0{0%{transform:translate(0,0) rotate(0);opacity:1}100%{transform:translate(-120px,-220px) rotate(360deg);opacity:0}}
       @keyframes cf1{0%{transform:translate(0,0) rotate(0);opacity:1}100%{transform:translate(100px,-260px) rotate(-280deg);opacity:0}}
@@ -3000,7 +3036,13 @@ function App(){
       ::-webkit-scrollbar{width:6px;height:6px}::-webkit-scrollbar-thumb{background:${C.border};border-radius:3px}`}</style>
 
     {/* HEADER */}
-    <div style={{background:C.bg2,borderBottom:`1px solid ${C.border}`,padding:`${10*sc}px ${16*sc}px`,display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:8,position:"sticky",top:0,zIndex:800,backdropFilter:"blur(12px)"}}>
+    <div style={{position:"sticky",top:0,zIndex:800}}>
+      {/* Live broadcast strip */}
+      {!spectator&&broadcasting&&isMaster&&!offlineMode&&<div style={{background:"linear-gradient(90deg,#FF4444,#FF6B6B,#FF4444)",padding:"3px 0",display:"flex",alignItems:"center",justifyContent:"center",gap:6,animation:"liveShimmer 3s ease infinite",backgroundSize:"200% 100%"}}>
+        <span style={{width:6,height:6,borderRadius:"50%",background:"#FFF",animation:"pulse 1.5s infinite"}}/>
+        <span style={{fontSize:10,fontWeight:800,color:"#FFF",letterSpacing:"0.12em",textTransform:"uppercase"}}>Broadcasting Live to Spectators</span>
+      </div>}
+      <div style={{background:C.bg2,borderBottom:`1px solid ${C.border}`,padding:`${10*sc}px ${16*sc}px`,display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:8,backdropFilter:"blur(12px)"}}>
       <div>
         <div style={{fontSize:20*sc,fontWeight:900,letterSpacing:"0.04em",textTransform:"uppercase",...(theme==="sun"?{color:"#000"}:{background:"linear-gradient(135deg,#00D4AA,#3B82F6)",WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent"})}}>"Game On" Cornhole</div>
         <div style={{fontSize:9*sc,color:C.dim,letterSpacing:"0.1em",textTransform:"uppercase",display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
@@ -3046,7 +3088,7 @@ function App(){
         </>}
         <input ref={fileRef} type="file" accept=".json" onChange={fileLoad} style={{display:"none"}}/>
       </div>
-    </div>
+    </div></div>
 
     {/* NOTIFICATIONS */}
     {note&&<div style={{position:"fixed",top:12,left:"50%",transform:"translateX(-50%)",zIndex:2000,padding:`${7*sc}px ${18*sc}px`,borderRadius:8,fontWeight:700,fontSize:13*sc,background:note.type==="success"?C.W:note.type==="error"?C.red:C.blue,color:"#FFF",boxShadow:`0 4px 20px ${C.shadow}`}}>{note.msg}</div>}
@@ -3074,7 +3116,7 @@ function App(){
         <div style={{padding:`${8*sc}px ${16*sc}px`,background:C.blueBg,borderRadius:10,border:`1px solid ${C.blue}44`,display:"inline-flex",alignItems:"center",gap:8}}>
           <span style={{width:8,height:8,borderRadius:"50%",background:specConn?C.W:C.red,animation:specConn?"pulse 2s infinite":"none"}}/>
           <span style={{fontSize:13*sc,fontWeight:700,color:specConn?C.W:C.red}}>{specConn?"Connected":"Waiting for broadcast..."}</span>
-          {specData?.broadcastAt&&<span style={{fontSize:9*sc,color:C.dim}}>Updated {new Date(specData.broadcastAt).toLocaleTimeString()}</span>}
+          {specData?.broadcastAt&&<span style={{fontSize:9*sc,color:C.dim}}>Updated {fmtDate(specData.broadcastAt)}</span>}
         </div>
       </div>
       {specData?.bracket?.matches?(()=>{
@@ -3451,6 +3493,25 @@ function App(){
           </div>
         </div>}
       </div>
+      {/* GitHub Deploy */}
+      <div style={{fontSize:11*sc,fontWeight:700,color:C.accent,textTransform:"uppercase",marginBottom:6,marginTop:12}}>Deploy</div>
+      <div style={{background:C.accentSoft,borderRadius:8,padding:12,marginBottom:10,border:`1px solid ${C.accent}44`}}>
+        <div style={{fontSize:13*sc,fontWeight:600,marginBottom:4}}>Push to GitHub Pages</div>
+        <div style={{fontSize:10*sc,color:C.dim,marginBottom:8,lineHeight:1.4}}>
+          Deploy this version (or upload a new HTML file) directly to your repo. Requires a Personal Access Token with repo scope.</div>
+        <input value={ghToken} onChange={e=>{const v=e.target.value;setGhToken(v);try{localStorage.setItem("gh_pat",v)}catch{}}} placeholder="GitHub PAT (ghp_...)"
+          type="password" style={{...I,padding:"6px 10px",fontSize:11*sc,marginBottom:8,fontFamily:"monospace"}}/>
+        <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+          <button onClick={()=>ghDeploy()} disabled={ghDeploying||!ghToken.trim()}
+            style={{...B("a"),flex:1,justifyContent:"center",opacity:ghDeploying||!ghToken.trim()?0.4:1}}>
+            {ghDeploying?"Deploying...":"Deploy This Version"}</button>
+          <button onClick={()=>{const inp=document.createElement("input");inp.type="file";inp.accept=".html";inp.onchange=e=>{const f=e.target.files?.[0];if(f)ghDeploy(f)};inp.click()}}
+            disabled={ghDeploying||!ghToken.trim()}
+            style={{...B("c"),flex:1,justifyContent:"center",opacity:ghDeploying||!ghToken.trim()?0.4:1}}>
+            Upload + Deploy</button>
+        </div>
+        <div style={{fontSize:9*sc,color:C.dim,marginTop:6}}>Repo: Sjtoth1/cornhole, Branch: main, File: index.html</div>
+      </div>
       {/* Admin security */}
       <div style={{fontSize:11*sc,fontWeight:700,color:C.red,textTransform:"uppercase",marginBottom:6,marginTop:12}}>Security</div>
       <div style={{background:C.redBg,borderRadius:8,padding:12,marginBottom:10,border:`1px solid ${C.red}44`}}>
@@ -3533,22 +3594,27 @@ function App(){
 
     {/* BACKUPS */}
     {modal?.type==="backups"&&<div style={OV} onClick={e=>{if(e.target===e.currentTarget)setModal(null)}}><div style={{...CD,maxWidth:560,width:"95%",maxHeight:"85vh",display:"flex",flexDirection:"column"}}>
-      <div style={{display:"flex",justifyContent:"space-between",marginBottom:12}}><span style={{fontSize:16*sc,fontWeight:800}}>Backups</span>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12,flexShrink:0}}><span style={{fontSize:16*sc,fontWeight:800}}>Backups</span>
         <button onClick={()=>setModal(null)} style={{...B("g"),padding:"4px 8px",fontSize:16}}>{"\u2715"}</button></div>
-      <div style={{display:"flex",gap:6,marginBottom:12,flexWrap:"wrap"}}>
+      <div style={{display:"flex",gap:6,marginBottom:12,flexWrap:"wrap",flexShrink:0}}>
         <button onClick={async()=>{await doSnap(ser(),"Manual");flash("Saved!","success");setBackups(await allBk())}} style={B("a")}>Snapshot</button>
         <button onClick={fileSave} style={B("c")}>Download</button><button onClick={()=>fileRef.current?.click()} style={B("c")}>Load File</button></div>
-      <div style={{fontSize:11*sc,color:C.dim,marginBottom:10}}>Milestones (purple) per round. Safety backups (gold) survive resets.</div>
-      <div style={{flex:1,overflowY:"auto"}}>{backups.length===0?<div style={{textAlign:"center",padding:24,color:C.dim}}>No backups yet</div>:backups.map(bk=>{
+      <div style={{fontSize:10*sc,color:C.dim,marginBottom:10,lineHeight:1.4,flexShrink:0}}>Milestones (purple) per round, kept 30. Safety backups (gold) survive resets, kept 20. Cloud icon = synced across devices.</div>
+      <div style={{flex:1,overflowY:"auto",WebkitOverflowScrolling:"touch",minHeight:0}}>{backups.length===0?<div style={{textAlign:"center",padding:24,color:C.dim}}>No backups yet</div>:backups.map(bk=>{
         const sf=bk.kind==="safety",ml=bk.kind==="milestone";
-        return <div key={bk.key} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 12px",borderRadius:7,marginBottom:3,
+        return <div key={bk.key+(bk.shared?"s":"")} style={{display:"flex",alignItems:"center",gap:8,padding:`${6*sc}px ${10*sc}px`,borderRadius:7,marginBottom:3,
           background:sf?C.LBg:ml?C.purpleBg:C.input,border:`1px solid ${sf?C.L:ml?C.purple:C.border}`}}>
-          <div><div style={{display:"flex",alignItems:"center",gap:5}}>
-            {sf&&<span style={{fontSize:8*sc,fontWeight:800,color:C.L,textTransform:"uppercase",padding:"1px 5px",background:C.LBg,borderRadius:3,border:`1px solid ${C.L}`}}>Safety</span>}
-            {ml&&<span style={{fontSize:8*sc,fontWeight:800,color:C.purple,textTransform:"uppercase",padding:"1px 5px",background:C.purpleBg,borderRadius:3,border:`1px solid ${C.purple}`}}>Milestone</span>}
-            <span style={{fontSize:12*sc,fontWeight:(sf||ml)?700:500}}>{bk.snapLabel}</span></div>
-            <div style={{fontSize:10*sc,color:C.dim}}>{new Date(bk.snapTime).toLocaleString()}</div></div>
-          <button onClick={()=>restoreBk(bk.key)} style={B("s")}>Restore</button></div>})}</div></div></div>}
+          <div style={{flex:1,minWidth:0}}>
+            <div style={{display:"flex",alignItems:"center",gap:4,flexWrap:"wrap"}}>
+              {sf&&<span style={{fontSize:Math.max(7,8*sc),fontWeight:800,color:C.L,textTransform:"uppercase",padding:"1px 5px",background:C.LBg,borderRadius:3,border:`1px solid ${C.L}`,flexShrink:0}}>Safety</span>}
+              {ml&&<span style={{fontSize:Math.max(7,8*sc),fontWeight:800,color:C.purple,textTransform:"uppercase",padding:"1px 5px",background:C.purpleBg,borderRadius:3,border:`1px solid ${C.purple}`,flexShrink:0}}>Milestone</span>}
+              {bk.shared&&<span style={{fontSize:Math.max(8,9*sc),flexShrink:0}} title="Synced to cloud">{"\u2601"}</span>}
+              <span style={{fontSize:Math.max(10,12*sc),fontWeight:(sf||ml)?700:500,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",minWidth:0}}>{bk.snapLabel}</span>
+            </div>
+            <div style={{fontSize:Math.max(9,10*sc),color:C.dim,marginTop:2}}>{fmtDate(bk.snapTime)}</div>
+          </div>
+          <button onClick={()=>restoreBk(bk.key,bk.shared)} style={{...B("s"),flexShrink:0,padding:`${4*sc}px ${8*sc}px`,fontSize:Math.max(10,11*sc)}}>Restore</button>
+        </div>})}</div></div></div>}
 
     {/* CHAT */}
     <div style={{position:"fixed",bottom:12,right:12,zIndex:900,display:"flex",flexDirection:"column",alignItems:"flex-end",gap:6,maxWidth:"90vw"}}>
